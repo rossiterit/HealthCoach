@@ -3,12 +3,14 @@
  * test/run.js — the offline suite.
  *
  * Covers everything that does not need the network: the shared store and its
- * restart-safety, nutrition normalisation, secret redaction, and the HTTP surface
+ * restart-safety, nutrition normalisation, the coach's three store-writing
+ * tools, secret redaction, and the HTTP surface
  * (booted as a real child process on a throwaway port and a throwaway data dir,
  * so the startup path itself is under test).
  *
  * What this suite CANNOT see, and what therefore still needs a live check:
- *   - anything requiring a real Claude call;
+ *   - anything requiring a real Claude call: the onboarding interview, meal
+ *     parsing quality, coaching tone;
  *   - a real Telegram delivery;
  *   - how any of it looks. Visual placement is owner click-through only.
  * A green run here is a floor, not an acceptance.
@@ -24,6 +26,7 @@ const ROOT = path.join(__dirname, '..');
 const { Store, localDate } = require(path.join(ROOT, 'lib/store'));
 const nutrition = require(path.join(ROOT, 'lib/nutrition'));
 const secrets = require(path.join(ROOT, 'lib/secrets'));
+const dietcoach = require(path.join(ROOT, 'lib/dietcoach'));
 
 let passed = 0;
 const failures = [];
@@ -172,6 +175,94 @@ async function secretTests() {
 }
 
 // ---------------------------------------------------------------------------
+// the coach's tools
+// ---------------------------------------------------------------------------
+
+async function toolTests() {
+  await test('log_meal writes a meal with per-item and total nutrition', () => {
+    const s = new Store(tmpDir()).load();
+    const out = dietcoach.runTool(s, CFG, 'log_meal', {
+      description: 'two eggs on toast',
+      meal_type: 'breakfast',
+      items: [
+        { name: 'eggs', quantity: '2', nutrition: { calories_kcal: 140, protein_g: 12 } },
+        { name: 'toast', quantity: '2 slices', nutrition: { calories_kcal: 160, protein_g: 6 } },
+      ],
+    });
+    assert.ok(out.logged, 'the tool should report the row it wrote');
+    assert.strictEqual(s.data.meals.length, 1);
+    assert.strictEqual(out.logged.nutrition.calories_kcal, 300);
+    assert.strictEqual(out.logged.nutrition.protein_g, 18);
+    assert.strictEqual(out.logged.items.length, 2);
+    assert.strictEqual(out.logged.estimate, true);
+    assert.ok(out.result.includes('estimate'), 'the model must be told the figures are estimates');
+  });
+
+  await test('correct_meal revises in place and stamps the correction (F3)', () => {
+    const s = new Store(tmpDir()).load();
+    const first = dietcoach.runTool(s, CFG, 'log_meal', {
+      description: 'large flat white',
+      items: [{ name: 'flat white', nutrition: { calories_kcal: 220 } }],
+    }).logged;
+
+    const out = dietcoach.runTool(s, CFG, 'correct_meal', {
+      meal_id: first.id,
+      description: 'small flat white',
+      items: [{ name: 'flat white', quantity: 'small', nutrition: { calories_kcal: 110 } }],
+    });
+
+    assert.strictEqual(s.data.meals.length, 1, 'a correction revises, it does not duplicate');
+    assert.strictEqual(out.corrected.id, first.id);
+    assert.strictEqual(out.corrected.description, 'small flat white');
+    assert.strictEqual(out.corrected.nutrition.calories_kcal, 110);
+    assert.ok(out.corrected.correctedAt, 'a revised row must show it was revised');
+  });
+
+  await test('correct_meal on an unknown id reports back instead of writing', () => {
+    const s = new Store(tmpDir()).load();
+    const out = dietcoach.runTool(s, CFG, 'correct_meal', { meal_id: 'meal_nope' });
+    assert.strictEqual(s.data.meals.length, 0);
+    assert.ok(/No meal with id/.test(out.result));
+  });
+
+  await test('save_goals persists the working frame', () => {
+    const s = new Store(tmpDir()).load();
+    const out = dietcoach.runTool(s, CFG, 'save_goals', {
+      summary: 'Lose a stone by spring without giving up bread.',
+      targets: { calories_kcal_per_day: 2100 },
+      constraints: ['shellfish allergy'],
+    });
+    assert.ok(out.goals);
+    assert.strictEqual(s.getGoals().targets.calories_kcal_per_day, 2100);
+    assert.deepStrictEqual(s.getGoals().constraints, ['shellfish allergy']);
+  });
+
+  await test('the coach is given exactly three tools, all writing to its own store', () => {
+    // Governance: no self-modification path exists. If this fails, someone added
+    // a capability that needs owner change control, not a code review.
+    const names = dietcoach.TOOLS.map((t) => t.name).sort();
+    assert.deepStrictEqual(names, ['correct_meal', 'log_meal', 'save_goals']);
+  });
+
+  await test('the system prompt carries the goals doc and the day so far', () => {
+    const s = new Store(tmpDir()).load();
+    s.setGoals({ summary: 'More protein, less faff.', targets: { protein_g_per_day: 130 } });
+    s.addMeal({ description: 'porridge', mealType: 'breakfast', nutrition: { calories_kcal: 300 } });
+    const sys = dietcoach.buildSystem(s, CFG);
+    assert.ok(sys.includes('More protein, less faff.'), 'goals must be in the frame');
+    assert.ok(sys.includes('protein_g_per_day: 130'));
+    assert.ok(sys.includes('porridge'), 'recent meals must be in the frame');
+    assert.ok(!sys.includes('ONBOARDING INTERVIEW'), 'onboarding must not re-trigger once goals exist');
+  });
+
+  await test('with no goals doc, the prompt runs the onboarding interview (F2)', () => {
+    const s = new Store(tmpDir()).load();
+    const sys = dietcoach.buildSystem(s, CFG);
+    assert.ok(sys.includes('ONBOARDING INTERVIEW'), 'the first conversation must interview');
+  });
+}
+
+// ---------------------------------------------------------------------------
 // the HTTP surface (booted for real, on a throwaway port and data dir)
 // ---------------------------------------------------------------------------
 
@@ -182,6 +273,23 @@ function get(port, p) {
       res.on('data', (c) => (d += c));
       res.on('end', () => resolve({ status: res.statusCode, body: d, headers: res.headers }));
     }).on('error', reject);
+  });
+}
+
+function post(port, p, payload) {
+  return new Promise((resolve, reject) => {
+    const body = JSON.stringify(payload);
+    const req = http.request(
+      { host: '127.0.0.1', port, path: p, method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) } },
+      (res) => {
+        let d = '';
+        res.on('data', (c) => (d += c));
+        res.on('end', () => resolve({ status: res.statusCode, body: d }));
+      }
+    );
+    req.on('error', reject);
+    req.end(body);
   });
 }
 
@@ -241,6 +349,12 @@ async function serverTests() {
       assert.strictEqual(sum.estimate, true, 'the API must state that figures are estimates');
     });
 
+    await test('POST /api/chat rejects an empty message before spending a model call', async () => {
+      const r = await post(port, '/api/chat', { message: '   ' });
+      assert.strictEqual(r.status, 400);
+      assert.ok(JSON.parse(r.body).error);
+    });
+
     await test('an unknown endpoint 404s as JSON', async () => {
       const r = await get(port, '/api/nope');
       assert.strictEqual(r.status, 404);
@@ -276,6 +390,7 @@ async function main() {
   await storeTests();
   await nutritionTests();
   await secretTests();
+  await toolTests();
   await serverTests();
 
   console.log(`\n${passed} passed, ${failures.length} failed`);
