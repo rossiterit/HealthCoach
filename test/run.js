@@ -331,11 +331,34 @@ async function serverTests() {
       assert.ok(!/sk-ant|bot[0-9]{6,}:/.test(r.body), 'no credential shape may appear in the payload');
     });
 
+    await test('the chat page is served, and it is the Paper & Ink document', async () => {
+      const r = await get(port, '/');
+      assert.strictEqual(r.status, 200);
+      assert.ok(/text\/html/.test(r.headers['content-type']));
+      assert.ok(r.body.includes('--paper: #f4ece0'), 'brand tokens must be present');
+      assert.ok(r.body.includes('--ink: #33291f'));
+      assert.ok(r.body.includes('class="crown"'), 'the dark crown header is part of the standard');
+      assert.ok(r.body.includes('DietCoach'));
+    });
+
+    await test('the page never builds markup from model output', async () => {
+      // Coach replies and meal descriptions are rendered as text nodes, never
+      // as HTML. If innerHTML shows up here, a reply could inject markup.
+      const r = await get(port, '/');
+      // Look for the sinks themselves, not the word — a comment saying "never
+      // innerHTML" should not fail this, but an assignment must.
+      assert.ok(!/\.innerHTML\s*=/.test(r.body), 'nothing may be assigned to innerHTML');
+      assert.ok(!/insertAdjacentHTML|document\.write|\.outerHTML\s*=/.test(r.body), 'no other markup sink');
+      assert.ok(r.body.includes('createTextNode'), 'text is appended as text nodes');
+    });
+
     await test('the nginx /healthcoach/ prefix and the bare path behave identically', async () => {
       const bare = await get(port, '/api/health');
       const prefixed = await get(port, '/healthcoach/api/health');
       assert.strictEqual(prefixed.status, 200);
       assert.strictEqual(JSON.parse(bare.body).service, JSON.parse(prefixed.body).service);
+      const page = await get(port, '/healthcoach/');
+      assert.strictEqual(page.status, 200, 'the page must also serve under the nginx prefix');
     });
 
     await test('the internal API exposes goals, meals, summary and history (F7)', async () => {

@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DietCoach — HealthCoach</title>
+<style>
+  /* Paper & Ink — the house brand. Tokens match the DrumCoach build so the two
+     apps read as one estate: warm paper field, dark crown, serif headings,
+     uppercase micro-labels, cards with a single accent rule along the top. */
+  :root {
+    --paper: #f4ece0; --paper2: #efe5d6; --card: #faf5ec;
+    --ink: #33291f; --muted: #8a7c6a; --line: #e0d4c2;
+    --ac-green: #4f6b52; --ac-clay: #b5654a; --ac-slate: #4a5b7a;
+    --ac-gold: #b08d57; --ac-plum: #6b4a5b;
+    --warn-text: #a34a30;
+    --serif: Georgia, "Times New Roman", serif;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    background: var(--paper); color: var(--ink);
+    font-family: var(--sans); font-size: 15px; line-height: 1.55;
+    display: flex; flex-direction: column;
+  }
+
+  /* ---- Crown ---- */
+  .crown {
+    background: linear-gradient(#2b2118, #3a2e22);
+    border-bottom: 2px solid var(--ac-gold);
+    text-align: center; padding: 24px 20px 20px; flex: none;
+  }
+  .crown .monogram {
+    font-size: 10px; letter-spacing: .2em; text-transform: uppercase;
+    color: var(--ac-gold); margin-bottom: 6px;
+  }
+  .crown h1 {
+    font-family: var(--serif); font-size: 32px; font-weight: 600;
+    color: #f4ece0; line-height: 1.1;
+  }
+  .crown .vision {
+    font-family: var(--serif); font-style: italic; color: #d9cbb4;
+    font-size: 14px; margin-top: 6px;
+  }
+
+  /* ---- Toolbar ---- */
+  .toolbar { background: var(--paper); border-bottom: 1px solid var(--line); flex: none; }
+  .toolbar .inner {
+    max-width: 760px; margin: 0 auto; padding: 9px 20px;
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 12px; flex-wrap: wrap;
+  }
+  .status {
+    display: flex; align-items: center; gap: 8px;
+    font-size: 11px; letter-spacing: .14em; text-transform: uppercase; color: var(--muted);
+  }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ac-clay); flex: none; }
+  .dot.ok { background: var(--ac-green); }
+  .today { font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); }
+  .today b { font-family: var(--serif); font-size: 14px; letter-spacing: 0; text-transform: none; color: var(--ink); }
+
+  /* ---- Transcript ---- */
+  main { flex: 1 1 auto; overflow-y: auto; }
+  .wrap { max-width: 760px; margin: 0 auto; padding: 22px 20px 28px; }
+
+  .turn { margin-bottom: 18px; display: flex; flex-direction: column; }
+  .turn .tag {
+    font-size: 10px; letter-spacing: .14em; text-transform: uppercase;
+    color: var(--muted); margin-bottom: 5px;
+  }
+  .turn.coach .bubble {
+    background: var(--card); border: 1px solid var(--line); border-top: 3px solid var(--ac-gold);
+    border-radius: 14px; padding: 14px 17px; align-self: flex-start; max-width: 92%;
+  }
+  .turn.owner { align-items: flex-end; }
+  .turn.owner .tag { text-align: right; }
+  .turn.owner .bubble {
+    background: var(--paper2); border: 1px solid var(--line); border-top: 3px solid var(--ac-slate);
+    border-radius: 14px; padding: 14px 17px; max-width: 92%;
+  }
+  .bubble p + p { margin-top: .7em; }
+
+  /* ---- Logged-meal echo card (F3: the misparse must be visible) ---- */
+  .meal {
+    background: var(--card); border: 1px solid var(--line); border-top: 3px solid var(--ac-green);
+    border-radius: 12px; padding: 13px 16px; margin-top: 10px; align-self: flex-start;
+    max-width: 92%; width: 100%;
+  }
+  .meal.corrected { border-top-color: var(--ac-clay); }
+  .meal .mtag {
+    font-size: 10px; letter-spacing: .14em; text-transform: uppercase; color: var(--muted);
+    display: flex; gap: 8px; flex-wrap: wrap; align-items: baseline; margin-bottom: 4px;
+  }
+  .meal .est { color: var(--ac-clay); }
+  .meal h3 { font-family: var(--serif); font-size: 15px; font-weight: 600; margin-bottom: 6px; }
+  .meal ul { list-style: none; margin: 0 0 8px; }
+  .meal li { font-size: 13px; color: var(--ink); padding: 1px 0; }
+  .meal li span { color: var(--muted); }
+  .macros { display: flex; flex-wrap: wrap; gap: 14px; border-top: 1px solid var(--line); padding-top: 8px; }
+  .macro { min-width: 62px; }
+  .macro .k { display: block; font-size: 9px; letter-spacing: .14em; text-transform: uppercase; color: var(--muted); }
+  .macro .v { font-family: var(--serif); font-size: 16px; }
+
+  .note { color: var(--muted); font-size: 13px; font-style: italic; }
+  .err {
+    color: var(--warn-text); font-size: 13px; border-left: 3px solid var(--warn-text);
+    padding-left: 10px; margin-bottom: 18px;
+  }
+
+  /* ---- Composer ---- */
+  footer { flex: none; background: var(--paper); border-top: 1px solid var(--line); }
+  .composer { max-width: 760px; margin: 0 auto; padding: 12px 20px 16px; display: flex; gap: 10px; align-items: flex-end; }
+  textarea {
+    flex: 1; resize: none; font-family: var(--sans); font-size: 15px; line-height: 1.5;
+    color: var(--ink); background: var(--card); border: 1px solid var(--line);
+    border-radius: 12px; padding: 11px 14px; min-height: 46px; max-height: 180px;
+  }
+  textarea:focus { outline: none; border-color: var(--ac-gold); }
+  button.send {
+    font-family: var(--sans); font-size: 11px; letter-spacing: .14em; text-transform: uppercase;
+    color: #f4ece0; background: #3a2e22; border: 1px solid #2b2118; border-radius: 12px;
+    padding: 14px 20px; cursor: pointer;
+  }
+  button.send:hover { background: #2b2118; }
+  button.send:disabled { opacity: .5; cursor: default; }
+  .hint { max-width: 760px; margin: 0 auto; padding: 0 20px 12px; font-size: 11px; color: var(--muted); }
+
+  @media (max-width: 560px) {
+    .crown h1 { font-size: 26px; }
+    .crown { padding: 18px 16px 15px; }
+    .turn.coach .bubble, .turn.owner .bubble, .meal { max-width: 100%; }
+  }
+</style>
+</head>
+<body>
+
+<header class="crown">
+  <div class="monogram">HealthCoach</div>
+  <h1>DietCoach</h1>
+  <div class="vision">Tell me what you ate. I'll keep the record.</div>
+</header>
+
+<div class="toolbar">
+  <div class="inner">
+    <div class="status"><span class="dot" id="dot"></span><span id="state">connecting</span></div>
+    <div class="today">Today <b id="today">—</b></div>
+  </div>
+</div>
+
+<main id="main">
+  <div class="wrap" id="transcript"></div>
+</main>
+
+<footer>
+  <div class="composer">
+    <textarea id="input" rows="1" placeholder="What have you eaten?" autofocus></textarea>
+    <button class="send" id="send">Send</button>
+  </div>
+  <div class="hint">Every nutrition figure here is the coach's estimate, not a measurement. Correct it by replying.</div>
+</footer>
+
+<script>
+'use strict';
+// The page is a plain client of the same /api/* surface Glorian will use later.
+// It has no private endpoints of its own — that is the point of F7.
+const API = new URL('.', location.href).pathname.replace(/\/$/, '') + '/api';
+
+const $ = (id) => document.getElementById(id);
+const transcript = $('transcript');
+const input = $('input');
+const sendBtn = $('send');
+
+function el(tag, cls, text) {
+  const n = document.createElement(tag);
+  if (cls) n.className = cls;
+  if (text !== undefined) n.textContent = text;
+  return n;
+}
+
+/** Render paragraphs from plain text — never innerHTML, so model output can't inject markup. */
+function paragraphs(parent, text) {
+  String(text).split(/\n{2,}/).forEach((para) => {
+    const p = el('p');
+    para.split('\n').forEach((line, i) => {
+      if (i) p.appendChild(document.createElement('br'));
+      p.appendChild(document.createTextNode(line));
+    });
+    parent.appendChild(p);
+  });
+}
+
+function addTurn(role, text) {
+  const turn = el('div', 'turn ' + (role === 'user' ? 'owner' : 'coach'));
+  turn.appendChild(el('div', 'tag', role === 'user' ? 'You' : 'DietCoach'));
+  const bubble = el('div', 'bubble');
+  paragraphs(bubble, text);
+  turn.appendChild(bubble);
+  transcript.appendChild(turn);
+  return turn;
+}
+
+const MACROS = [
+  ['calories_kcal', 'kcal'],
+  ['protein_g', 'protein'],
+  ['carb_g', 'carb'],
+  ['fat_g', 'fat'],
+  ['fiber_g', 'fibre'],
+  ['added_sugar_g', 'added sugar'],
+];
+
+function addMeal(meal, corrected) {
+  const card = el('div', 'meal' + (corrected ? ' corrected' : ''));
+  const tag = el('div', 'mtag');
+  tag.appendChild(el('span', null, corrected ? 'Corrected' : 'Logged'));
+  tag.appendChild(el('span', null, meal.mealType));
+  tag.appendChild(el('span', 'est', meal.estimate ? 'estimated' : meal.provenance));
+  card.appendChild(tag);
+  card.appendChild(el('h3', null, meal.description));
+
+  if (meal.items && meal.items.length) {
+    const ul = el('ul');
+    meal.items.forEach((it) => {
+      const li = el('li');
+      li.appendChild(document.createTextNode(it.name));
+      if (it.quantity) {
+        const s = el('span', null, ' — ' + it.quantity);
+        li.appendChild(s);
+      }
+      ul.appendChild(li);
+    });
+    card.appendChild(ul);
+  }
+
+  const macros = el('div', 'macros');
+  let any = false;
+  MACROS.forEach(([key, label]) => {
+    const v = meal.nutrition ? meal.nutrition[key] : null;
+    if (v === null || v === undefined) return;
+    any = true;
+    const m = el('div', 'macro');
+    m.appendChild(el('span', 'k', label));
+    m.appendChild(el('span', 'v', String(v)));
+    macros.appendChild(m);
+  });
+  if (any) card.appendChild(macros);
+
+  transcript.appendChild(card);
+}
+
+function addError(msg) {
+  transcript.appendChild(el('div', 'err', msg));
+  scroll();
+}
+
+function scroll() {
+  $('main').scrollTop = $('main').scrollHeight;
+}
+
+function setState(ok, label) {
+  $('dot').className = 'dot' + (ok ? ' ok' : '');
+  $('state').textContent = label;
+}
+
+async function refreshToday() {
+  try {
+    const r = await fetch(API + '/summary');
+    const d = await r.json();
+    const kcal = d.nutrition && d.nutrition.calories_kcal;
+    $('today').textContent = d.count
+      ? (kcal ? kcal + ' kcal est.' : d.count + ' logged')
+      : 'nothing logged';
+  } catch { /* the toolbar is decoration; a failure here must not break the chat */ }
+}
+
+async function boot() {
+  try {
+    const h = await (await fetch(API + '/health')).json();
+    setState(true, h.onboarded ? 'ready' : 'first conversation');
+  } catch {
+    setState(false, 'offline');
+  }
+
+  try {
+    const hist = await (await fetch(API + '/history?limit=60')).json();
+    const mealsById = {};
+    (hist.meals || []).forEach((m) => { mealsById[m.id] = m; });
+    (hist.messages || []).forEach((m) => {
+      addTurn(m.role, m.text);
+      (m.loggedIds || []).forEach((id) => { if (mealsById[id]) addMeal(mealsById[id], false); });
+    });
+    if (!(hist.messages || []).length) {
+      const t = addTurn('assistant', "We haven't spoken yet. Say hello and I'll ask you a few things about what you're after — or just tell me what you ate and we'll start there.");
+      t.classList.add('intro');
+    }
+  } catch {
+    addError('Could not load the conversation. The coach service may be down.');
+  }
+  refreshToday();
+  scroll();
+}
+
+async function send() {
+  const text = input.value.trim();
+  if (!text) return;
+  input.value = '';
+  input.style.height = 'auto';
+  addTurn('user', text);
+  scroll();
+
+  sendBtn.disabled = true;
+  const thinking = el('div', 'note', 'DietCoach is thinking…');
+  transcript.appendChild(thinking);
+  scroll();
+
+  try {
+    const r = await fetch(API + '/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: text }),
+    });
+    const d = await r.json();
+    thinking.remove();
+    if (!r.ok) { addError(d.error || 'The coach could not answer that.'); return; }
+    addTurn('assistant', d.reply);
+    (d.logged || []).forEach((m) => addMeal(m, false));
+    (d.corrected || []).forEach((m) => addMeal(m, true));
+    refreshToday();
+    setState(true, 'ready');
+  } catch (e) {
+    thinking.remove();
+    addError('Could not reach the coach. Check the service is running.');
+    setState(false, 'offline');
+  } finally {
+    sendBtn.disabled = false;
+    scroll();
+    input.focus();
+  }
+}
+
+sendBtn.addEventListener('click', send);
+input.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+});
+input.addEventListener('input', () => {
+  input.style.height = 'auto';
+  input.style.height = Math.min(input.scrollHeight, 180) + 'px';
+});
+
+boot();
+</script>
+</body>
+</html>

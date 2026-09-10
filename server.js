@@ -21,6 +21,8 @@
  * location block or hit directly on its port during testing.
  */
 const http = require('http');
+const fs = require('fs');
+const path = require('path');
 
 const { load } = require('./lib/config');
 const { Store, localDate } = require('./lib/store');
@@ -30,6 +32,9 @@ const nutrition = require('./lib/nutrition');
 const cfg = load();
 const store = new Store(cfg.dataDir).load();
 
+// The page is a single self-contained document, so it is read once at boot and
+// served from memory. A deploy is a restart, which is when it should change.
+const INDEX = fs.readFileSync(path.join(__dirname, 'public', 'index.html'), 'utf8');
 const MAX_BODY = 64 * 1024;
 
 // ---------------------------------------------------------------------------
@@ -103,6 +108,11 @@ function publicMeal(m) {
 async function route(req, res, url) {
   const p = normalisePath(url.pathname);
   const method = req.method;
+
+  // --- the chat page (F1) ---
+  if (method === 'GET' && (p === '/' || p === '/index.html')) {
+    return send(res, 200, INDEX, 'text/html; charset=utf-8');
+  }
 
   // --- liveness / config sanity, safe to expose: names no secret values ---
   if (method === 'GET' && p === '/api/health') {
