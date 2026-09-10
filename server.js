@@ -24,6 +24,7 @@ const http = require('http');
 
 const { load } = require('./lib/config');
 const { Store, localDate } = require('./lib/store');
+const dietcoach = require('./lib/dietcoach');
 const nutrition = require('./lib/nutrition');
 
 const cfg = load();
@@ -123,6 +124,27 @@ async function route(req, res, url) {
       nutritionEngine: cfg.nutrition.engine,
       checkin: { enabled: cfg.checkin.enabled, hourLocal: cfg.checkin.hourLocal },
     });
+  }
+
+  // --- a conversational turn (F3/F4) ---
+  if (method === 'POST' && p === '/api/chat') {
+    const body = await readJson(req);
+    const message = typeof body.message === 'string' ? body.message.trim() : '';
+    if (!message) return send(res, 400, { error: 'Send a non-empty "message".' });
+
+    try {
+      const out = await dietcoach.turn(store, cfg, message);
+      return send(res, 200, {
+        reply: out.reply,
+        logged: out.logged.map(publicMeal),
+        corrected: out.corrected.map(publicMeal),
+        goalsUpdated: out.goalsUpdated,
+      });
+    } catch (e) {
+      // The message is already redacted by lib/claude.js before it gets here.
+      console.error('[chat]', e.message);
+      return send(res, 502, { error: e.message });
+    }
   }
 
   // --- goals doc (F2) ---
