@@ -4,13 +4,13 @@
  *
  * Covers everything that does not need the network: the shared store and its
  * restart-safety, nutrition normalisation, the coach's three store-writing
- * tools, secret redaction, and the HTTP surface
+ * tools, the once-a-day check-in cap, secret redaction, and the HTTP surface
  * (booted as a real child process on a throwaway port and a throwaway data dir,
  * so the startup path itself is under test).
  *
  * What this suite CANNOT see, and what therefore still needs a live check:
  *   - anything requiring a real Claude call: the onboarding interview, meal
- *     parsing quality, coaching tone;
+ *     parsing quality, coaching tone, check-in copy;
  *   - a real Telegram delivery;
  *   - how any of it looks. Visual placement is owner click-through only.
  * A green run here is a floor, not an acceptance.
@@ -27,6 +27,8 @@ const { Store, localDate } = require(path.join(ROOT, 'lib/store'));
 const nutrition = require(path.join(ROOT, 'lib/nutrition'));
 const secrets = require(path.join(ROOT, 'lib/secrets'));
 const dietcoach = require(path.join(ROOT, 'lib/dietcoach'));
+const checkin = require(path.join(ROOT, 'lib/checkin'));
+const telegram = require(path.join(ROOT, 'lib/telegram'));
 
 let passed = 0;
 const failures = [];
@@ -263,6 +265,92 @@ async function toolTests() {
 }
 
 // ---------------------------------------------------------------------------
+// the daily check-in cap
+// ---------------------------------------------------------------------------
+
+async function checkinTests() {
+  const realCompose = dietcoach.composeCheckin;
+  const realSend = telegram.send;
+
+  await test('the check-in sends once, then reports already-sent (F5 hard cap)', async () => {
+    const s = new Store(tmpDir()).load();
+    let sends = 0;
+    dietcoach.composeCheckin = async () => 'You logged porridge and not much else yesterday. What does a good lunch look like this week?';
+    telegram.send = async () => { sends += 1; return 4242; };
+
+    const first = await checkin.run(s, CFG, {});
+    const second = await checkin.run(s, CFG, {});
+    const third = await checkin.run(s, CFG, {});
+
+    assert.strictEqual(first.status, 'sent');
+    assert.strictEqual(first.messageId, 4242);
+    assert.strictEqual(second.status, 'already-sent');
+    assert.strictEqual(third.status, 'already-sent');
+    assert.strictEqual(sends, 1, 'never more than one check-in a day');
+    assert.strictEqual(s.data.checkins.length, 1);
+  });
+
+  await test('the check-in links to the chat page', async () => {
+    const s = new Store(tmpDir()).load();
+    dietcoach.composeCheckin = async () => 'Short line.';
+    telegram.send = async () => 1;
+    const out = await checkin.run(s, CFG, {});
+    assert.ok(out.text.includes(CFG.publicUrl), 'the ping must link back to the page');
+  });
+
+  await test('a failed send still consumes the day — a miss, never a duplicate', async () => {
+    const s = new Store(tmpDir()).load();
+    let sends = 0;
+    dietcoach.composeCheckin = async () => 'Short line.';
+    telegram.send = async () => { sends += 1; throw new Error('Telegram unreachable'); };
+
+    const first = await checkin.run(s, CFG, {});
+    const second = await checkin.run(s, CFG, {});
+
+    assert.strictEqual(first.status, 'error');
+    assert.strictEqual(second.status, 'already-sent', 'a failure must not licence a retry that day');
+    assert.strictEqual(sends, 1);
+    assert.strictEqual(s.data.checkins[0].ok, false);
+  });
+
+  await test('a dry run composes without sending or claiming the day', async () => {
+    const s = new Store(tmpDir()).load();
+    let sends = 0;
+    dietcoach.composeCheckin = async () => 'Short line.';
+    telegram.send = async () => { sends += 1; return 1; };
+
+    const out = await checkin.run(s, CFG, { dryRun: true });
+    assert.strictEqual(out.status, 'dry-run');
+    assert.strictEqual(sends, 0);
+    assert.strictEqual(s.data.checkins.length, 0, 'a rehearsal must not burn the day');
+  });
+
+  await test('an empty composition sends nothing', async () => {
+    const s = new Store(tmpDir()).load();
+    let sends = 0;
+    dietcoach.composeCheckin = async () => '   ';
+    telegram.send = async () => { sends += 1; return 1; };
+    const out = await checkin.run(s, CFG, {});
+    assert.strictEqual(out.status, 'error');
+    assert.strictEqual(sends, 0);
+    assert.strictEqual(s.data.checkins.length, 0);
+  });
+
+  await test('isDue respects the configured hour and the once-a-day cap', () => {
+    const s = new Store(tmpDir()).load();
+    const at = (h) => new Date(`2026-07-01T${String(h).padStart(2, '0')}:05:00+01:00`);
+    assert.strictEqual(checkin.isDue(s, CFG, at(19)), false, 'not yet 20:00 local');
+    assert.strictEqual(checkin.isDue(s, CFG, at(20)), true);
+    assert.strictEqual(checkin.isDue(s, CFG, at(23)), true, 'a missed hour still fires later the same day');
+    s.addCheckin(localDate(at(20), CFG.timezone), 'sent', true);
+    assert.strictEqual(checkin.isDue(s, CFG, at(21)), false, 'already sent today');
+  });
+
+  dietcoach.composeCheckin = realCompose;
+  telegram.send = realSend;
+}
+
+// ---------------------------------------------------------------------------
 // the HTTP surface (booted for real, on a throwaway port and data dir)
 // ---------------------------------------------------------------------------
 
@@ -328,6 +416,7 @@ async function serverTests() {
       assert.strictEqual(d.ok, true);
       assert.strictEqual(d.service, 'healthcoach');
       assert.strictEqual(d.onboarded, false);
+      assert.strictEqual(typeof d.telegramConfigured, 'boolean', 'presence, not the value');
       assert.ok(!/sk-ant|bot[0-9]{6,}:/.test(r.body), 'no credential shape may appear in the payload');
     });
 
@@ -414,6 +503,7 @@ async function main() {
   await nutritionTests();
   await secretTests();
   await toolTests();
+  await checkinTests();
   await serverTests();
 
   console.log(`\n${passed} passed, ${failures.length} failed`);
