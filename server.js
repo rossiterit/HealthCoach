@@ -27,7 +27,9 @@ const path = require('path');
 const { load } = require('./lib/config');
 const { Store, localDate } = require('./lib/store');
 const dietcoach = require('./lib/dietcoach');
+const checkin = require('./lib/checkin');
 const nutrition = require('./lib/nutrition');
+const telegram = require('./lib/telegram');
 
 const cfg = load();
 const store = new Store(cfg.dataDir).load();
@@ -133,6 +135,9 @@ async function route(req, res, url) {
       },
       nutritionEngine: cfg.nutrition.engine,
       checkin: { enabled: cfg.checkin.enabled, hourLocal: cfg.checkin.hourLocal },
+      // Presence, never the value — the confidentiality floor applies to a
+      // health endpoint as much as to a log.
+      telegramConfigured: telegram.configured(cfg),
     });
   }
 
@@ -200,6 +205,18 @@ async function route(req, res, url) {
     });
   }
 
+  // --- the daily check-in (F5). The store enforces the once-a-day cap. ---
+  if (method === 'POST' && p === '/api/checkin/run') {
+    const body = await readJson(req);
+    try {
+      const out = await checkin.run(store, cfg, { force: Boolean(body.force), dryRun: Boolean(body.dryRun) });
+      return send(res, out.status === 'error' ? 502 : 200, out);
+    } catch (e) {
+      console.error('[checkin]', e.message);
+      return send(res, 502, { status: 'error', error: e.message });
+    }
+  }
+
   return send(res, 404, { error: 'No such endpoint.' });
 }
 
@@ -215,9 +232,34 @@ const server = http.createServer((req, res) => {
   });
 });
 
+/**
+ * In-process hourly tick for the daily check-in.
+ *
+ * Cheap, restart-safe, and needs no root to install — and because checkin.run()
+ * consults the store rather than the clock, an extra tick can never produce an
+ * extra message. The store is the cap; this is only what wakes it up.
+ */
+const HOUR = 60 * 60 * 1000;
+function startCheckinTimer() {
+  if (!cfg.checkin.enabled) return;
+  const tick = async () => {
+    try {
+      if (checkin.isDue(store, cfg)) {
+        const out = await checkin.run(store, cfg);
+        console.log(`[checkin] ${out.status} for ${out.date}`);
+      }
+    } catch (e) {
+      console.error('[checkin] tick failed:', e.message);
+    }
+  };
+  setTimeout(tick, 30 * 1000).unref?.();
+  setInterval(tick, HOUR);
+}
+
 server.listen(cfg.port, cfg.host, () => {
   console.log(`healthcoach listening on http://${cfg.host}:${cfg.port} (data: ${cfg.dataDir})`);
-  console.log(`public: ${cfg.publicUrl}`);
+  console.log(`public: ${cfg.publicUrl}  check-in: ${cfg.checkin.hourLocal}:00 ${cfg.timezone}`);
+  startCheckinTimer();
 });
 
 module.exports = { server, store, cfg, readJson, publicMeal, normalisePath };
