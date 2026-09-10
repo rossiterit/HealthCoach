@@ -1,0 +1,27 @@
+{
+  "port": 8789,
+  "host": "127.0.0.1",
+  "basePath": "/healthcoach/",
+  "publicUrl": "https://gotkapp.com/healthcoach/",
+  "dataDir": "data",
+  "timezone": "Europe/London",
+  "checkin": {
+    "hourLocal": 20,
+    "enabled": true
+  },
+  "coach": {
+    "model": "claude-opus-5",
+    "effort": "medium",
+    "maxTokens": 12000,
+    "historyTurns": 30
+  },
+  "nutrition": {
+    "engine": "estimate",
+    "_note": "SnapCalorie descoped by owner 2026-09-10 (override of build-package Decision 10). Decision 10's own fallback clause applies: Claude's estimate, stored and echoed flagged as an estimate. Set engine to 'snapcalorie' and place a key to re-enable GOTK-156."
+  },
+  "secrets": {
+    "anthropicKeyPath": "/root/gotk/scripts/anthropic_api_key.txt",
+    "telegramTokenPath": "/root/gotk/scripts/telegram_bot_token.txt",
+    "telegramChatIdPath": "/root/gotk/scripts/telegram_chat_id.txt"
+  }
+}

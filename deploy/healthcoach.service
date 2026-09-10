@@ -1,0 +1,34 @@
+[Unit]
+Description=HealthCoach (DietCoach v1)
+Documentation=https://rossiter.atlassian.net/wiki/spaces/GOTK/pages/164560898
+After=network.target
+
+[Service]
+Type=simple
+User=tony
+Group=tony
+WorkingDirectory=/home/tony/healthcoach
+ExecStart=/usr/bin/node /home/tony/healthcoach/server.js
+Restart=always
+RestartSec=5
+
+# The service binds loopback only; nginx terminates TLS and holds the auth gate.
+Environment=NODE_ENV=production
+
+# --- Hardening -------------------------------------------------------------
+# The coach has no tool that touches the filesystem, so the process needs write
+# access to exactly one directory: its own store. Everything else is read-only.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/tony/healthcoach/data
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target
