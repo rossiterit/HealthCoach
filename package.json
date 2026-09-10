@@ -1,0 +1,17 @@
+{
+  "name": "healthcoach",
+  "version": "1.0.0",
+  "private": true,
+  "description": "HealthCoach — one app, coaches as modules, over a shared health store. v1 ships DietCoach.",
+  "type": "commonjs",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "checkin": "node bin/checkin.js",
+    "test": "node test/run.js"
+  },
+  "engines": { "node": ">=20" },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.70.0"
+  }
+}
