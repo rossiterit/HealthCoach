@@ -1,0 +1,20 @@
+node_modules/
+
+# The health store. Real meals, real goals, real conversation — personal data,
+# never git-managed. Backed up out of band, not by the repo.
+data/
+*.tmp
+
+# Nothing credential-shaped is ever committed. The app reads secrets from
+# root-only files placed by the owner out of band; config.json carries their
+# paths, never their values. These patterns are a backstop, not the mechanism.
+secrets/
+*.key
+*.pem
+*_token.txt
+*_api_key.txt
+*_secret.txt
+
+# Local scratch
+*.log
+.DS_Store
