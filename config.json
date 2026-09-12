@@ -4,7 +4,7 @@
   "basePath": "/healthcoach/",
   "publicUrl": "https://gotkapp.com/healthcoach/",
   "dataDir": "data",
-  "timezone": "Europe/London",
+  "timezone": "America/Denver",
   "checkin": {
     "hourLocal": 20,
     "enabled": true
