@@ -85,6 +85,22 @@
   .step .dur { font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--ac-clay); margin-bottom: 6px; }
   .step .cue { font-size: 14px; }
   .step .why { font-size: 13px; color: var(--muted); font-style: italic; margin-top: 5px; }
+  .tally { display: flex; gap: 10px; flex-wrap: wrap; margin: 0 0 16px 32px; }
+  .chip {
+    background: var(--card); border: 1px solid var(--line); border-radius: 999px;
+    padding: 5px 14px; display: flex; align-items: baseline; gap: 7px;
+  }
+  .chip-n { font-family: var(--serif); font-size: 17px; }
+  .chip-l { font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); }
+  .suggestion {
+    background: var(--paper2); border: 1px solid var(--line); border-top: 3px solid var(--ac-green);
+    border-radius: 12px; padding: 13px 16px; margin-top: 18px;
+  }
+  .suggestion .n { font-size: 10px; letter-spacing: .14em; text-transform: uppercase; color: var(--muted); }
+  .suggestion h3 { font-family: var(--serif); font-size: 17px; font-weight: 600; margin: 3px 0 4px; }
+  .suggestion .cue { font-size: 14px; }
+  .suggestion .why { font-size: 13px; color: var(--muted); font-style: italic; margin-top: 6px; }
+
   .safety {
     border-left: 3px solid var(--ac-clay); padding: 8px 0 8px 12px; margin: 4px 0 18px;
     font-size: 13px; color: var(--muted);
@@ -185,6 +201,7 @@
     <div class="tabs" role="tablist">
       <button class="tab" id="tab-chat" role="tab" aria-selected="true" aria-controls="view-chat">Chat</button>
       <button class="tab" id="tab-stretch" role="tab" aria-selected="false" aria-controls="view-stretch">Stretch</button>
+      <button class="tab" id="tab-trend" role="tab" aria-selected="false" aria-controls="view-trend">Trend</button>
     </div>
     <div class="today">Today <b id="today">—</b></div>
   </div>
@@ -195,6 +212,7 @@
     <div id="transcript"></div>
   </div>
   <div class="view wrap" id="view-stretch" role="tabpanel" hidden></div>
+  <div class="view wrap" id="view-trend" role="tabpanel" hidden></div>
 </main>
 
 <footer>
@@ -389,6 +407,7 @@ async function send() {
 const TABS = [
   { tab: 'tab-chat', view: 'view-chat' },
   { tab: 'tab-stretch', view: 'view-stretch' },
+  { tab: 'tab-trend', view: 'view-trend' },
 ];
 let stretchLoaded = false;
 
@@ -400,6 +419,7 @@ function showTab(id) {
   });
   document.querySelector('footer').hidden = id !== 'tab-chat';
   if (id === 'tab-stretch' && !stretchLoaded) loadStretch();
+  if (id === 'tab-trend') loadTrend();
   $('main').scrollTop = 0;
   if (id === 'tab-chat') scroll();
 }
@@ -452,6 +472,68 @@ function renderRoutine(host, d, active) {
     if (s.why) card.appendChild(el('div', 'why', s.why));
     host.appendChild(card);
   });
+}
+
+// --- trend view: what was actually done -----------------------------------
+async function loadTrend() {
+  const host = $('view-trend');
+  host.textContent = '';
+  host.appendChild(el('div', 'note', 'Loading…'));
+  try {
+    const d = await (await fetch(API + '/movement?days=7')).json();
+    host.textContent = '';
+    renderMovement(host, d);
+  } catch {
+    host.textContent = '';
+    host.appendChild(el('div', 'err', 'Could not load. The service may be down.'));
+  }
+}
+
+function renderMovement(host, d) {
+  const head = el('div', 'routine-head');
+  head.appendChild(el('h2', null, 'This week'));
+  host.appendChild(head);
+
+  // States what happened. There is no streak, no active-day count, no target
+  // bar and no gap — by design, and the API does not send them either.
+  if (!d.week.count) {
+    host.appendChild(el('div', 'routine-meta', 'Nothing recorded yet this week.'));
+  } else {
+    const mins = d.week.totalMinutes ? ` · about ${d.week.totalMinutes} minutes all in` : '';
+    host.appendChild(el('div', 'routine-meta', `${d.week.count} recorded${mins}`));
+
+    const tally = el('div', 'tally');
+    d.week.byOutlet.forEach((o) => {
+      const chip = el('div', 'chip');
+      chip.appendChild(el('span', 'chip-n', String(o.count)));
+      chip.appendChild(el('span', 'chip-l', o.label));
+      tally.appendChild(chip);
+    });
+    host.appendChild(tally);
+
+    d.week.entries.forEach((w) => {
+      const card = el('div', 'step');
+      card.appendChild(el('div', 'n', `${w.date} · ${w.outletLabel}`));
+      card.appendChild(el('h3', null, w.description));
+      const bits = [];
+      if (w.durationMinutes) bits.push(`${w.durationMinutes} min`);
+      if (w.intensity) bits.push(w.intensity);
+      if (bits.length) card.appendChild(el('div', 'dur', bits.join(' · ')));
+      if (w.notes) card.appendChild(el('div', 'why', w.notes));
+      host.appendChild(card);
+    });
+  }
+
+  if (d.suggestion) {
+    const s = el('div', 'suggestion');
+    s.appendChild(el('div', 'n', 'If you fancy it today'));
+    s.appendChild(el('h3', null, d.suggestion.outlet.label));
+    s.appendChild(el('div', 'cue', d.suggestion.reason));
+    if (d.suggestion.tradeDown) {
+      s.appendChild(el('div', 'why', `Not happening? ${d.suggestion.tradeDown.label} counts just the same.`));
+    }
+    host.appendChild(s);
+  }
 }
 
 sendBtn.addEventListener('click', send);
