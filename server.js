@@ -30,7 +30,7 @@ const coach = require('./lib/coach');
 const stretch = require('./lib/stretch');
 const workouts = require('./lib/workouts');
 const weight = require('./lib/weight');
-const checkin = require('./lib/checkin');
+const briefing = require('./lib/briefing');
 const nutrition = require('./lib/nutrition');
 const telegram = require('./lib/telegram');
 
@@ -146,7 +146,7 @@ async function route(req, res, url) {
         energy: store.data.energy.length,
       },
       nutritionEngine: cfg.nutrition.engine,
-      checkin: { enabled: cfg.checkin.enabled, hourLocal: cfg.checkin.hourLocal },
+      briefing: { enabled: cfg.briefing.enabled, time: cfg.briefing.time, timezone: cfg.briefing.timezone },
       // Presence, never the value — the confidentiality floor applies to a
       // health endpoint as much as to a log.
       telegramConfigured: telegram.configured(cfg),
@@ -258,14 +258,17 @@ async function route(req, res, url) {
     });
   }
 
-  // --- the daily check-in (F5). The store enforces the once-a-day cap. ---
-  if (method === 'POST' && p === '/api/checkin/run') {
+  // --- the one daily touch (F1). The store enforces the once-a-day cap. ---
+  if (method === 'POST' && (p === '/api/briefing/run' || p === '/api/checkin/run')) {
+    // The v1 path still answers: it is what any existing cron entry calls, and
+    // silently breaking the owner's scheduler to rename a route would be a poor
+    // trade. Both routes hit the same store-enforced cap.
     const body = await readJson(req);
     try {
-      const out = await checkin.run(store, cfg, { force: Boolean(body.force), dryRun: Boolean(body.dryRun) });
+      const out = await briefing.run(store, cfg, { force: Boolean(body.force), dryRun: Boolean(body.dryRun) });
       return send(res, out.status === 'error' ? 502 : 200, out);
     } catch (e) {
-      console.error('[checkin]', e.message);
+      console.error('[briefing]', e.message);
       return send(res, 502, { status: 'error', error: e.message });
     }
   }
@@ -292,27 +295,31 @@ const server = http.createServer((req, res) => {
  * consults the store rather than the clock, an extra tick can never produce an
  * extra message. The store is the cap; this is only what wakes it up.
  */
-const HOUR = 60 * 60 * 1000;
-function startCheckinTimer() {
-  if (!cfg.checkin.enabled) return;
+// Ticks every five minutes rather than hourly, because the send time now has a
+// minute in it and an hourly tick would drift 07:30 to as late as 08:29.
+// Frequency is harmless: briefing.run() consults the store, so an extra tick can
+// never produce an extra message.
+const TICK_MS = 5 * 60 * 1000;
+function startBriefingTimer() {
+  if (!cfg.briefing.enabled) return;
   const tick = async () => {
     try {
-      if (checkin.isDue(store, cfg)) {
-        const out = await checkin.run(store, cfg);
-        console.log(`[checkin] ${out.status} for ${out.date}`);
+      if (briefing.isDue(store, cfg)) {
+        const out = await briefing.run(store, cfg);
+        console.log(`[briefing] ${out.status} for ${out.date}`);
       }
     } catch (e) {
-      console.error('[checkin] tick failed:', e.message);
+      console.error('[briefing] tick failed:', e.message);
     }
   };
   setTimeout(tick, 30 * 1000).unref?.();
-  setInterval(tick, HOUR);
+  setInterval(tick, TICK_MS);
 }
 
 server.listen(cfg.port, cfg.host, () => {
   console.log(`healthcoach listening on http://${cfg.host}:${cfg.port} (data: ${cfg.dataDir})`);
-  console.log(`public: ${cfg.publicUrl}  check-in: ${cfg.checkin.hourLocal}:00 ${cfg.timezone}`);
-  startCheckinTimer();
+  console.log(`public: ${cfg.publicUrl}  briefing: ${cfg.briefing.time} ${cfg.briefing.timezone}`);
+  startBriefingTimer();
 });
 
 module.exports = { server, store, cfg, readJson, publicMeal, normalisePath };

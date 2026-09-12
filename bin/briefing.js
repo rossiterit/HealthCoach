@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 'use strict';
 /**
- * bin/checkin.js — run the daily check-in from outside the service.
+ * bin/briefing.js — run the daily briefing from outside the service.
  *
  * The service already ticks hourly on its own, so this is the operator's handle
  * rather than the primary path: it is what a cron entry or a manual run calls,
@@ -11,20 +11,20 @@
  * the store, not the clock, so the once-a-day cap holds regardless of what
  * triggered it.
  *
- *   node bin/checkin.js            send today's check-in if it hasn't gone out
- *   node bin/checkin.js --dry-run  compose and print it, send nothing
- *   node bin/checkin.js --force    send even if today's has already gone
+ *   node bin/briefing.js            send today's briefing if it hasn't gone out
+ *   node bin/briefing.js --dry-run  compose and print it, send nothing
+ *   node bin/briefing.js --force    send even if today's has already gone
  */
 const { load } = require('../lib/config');
 const { Store } = require('../lib/store');
-const checkin = require('../lib/checkin');
+const briefing = require('../lib/briefing');
 
 async function main() {
   const args = process.argv.slice(2);
   const cfg = load();
   const store = new Store(cfg.dataDir).load();
 
-  const out = await checkin.run(store, cfg, {
+  const out = await briefing.run(store, cfg, {
     force: args.includes('--force'),
     dryRun: args.includes('--dry-run'),
   });

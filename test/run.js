@@ -32,7 +32,7 @@ const stretch = require(path.join(ROOT, 'lib/stretch'));
 const workouts = require(path.join(ROOT, 'lib/workouts'));
 const weight = require(path.join(ROOT, 'lib/weight'));
 const fitnesscoach = require(path.join(ROOT, 'lib/fitnesscoach'));
-const checkin = require(path.join(ROOT, 'lib/checkin'));
+const briefing = require(path.join(ROOT, 'lib/briefing'));
 const telegram = require(path.join(ROOT, 'lib/telegram'));
 
 let passed = 0;
@@ -52,7 +52,7 @@ const CFG = {
   timezone: 'Europe/London',
   fitness: { outlets: workouts.DEFAULT_OUTLETS },
   nutrition: { engine: 'estimate' },
-  checkin: { enabled: true, hourLocal: 20 },
+  briefing: { enabled: true, time: '07:30', timezone: 'America/Denver' },
   publicUrl: 'https://example.invalid/healthcoach/',
   secrets: {},
 };
@@ -592,88 +592,157 @@ async function noGuiltTests() {
 }
 
 // ---------------------------------------------------------------------------
-// the daily check-in cap
+// the one daily touch — now a morning briefing (GOTK-158)
 // ---------------------------------------------------------------------------
 
-async function checkinTests() {
-  const realCompose = checkin.compose;
+async function briefingTests() {
+  const realCompose = briefing.compose;
   const realSend = telegram.send;
+  const stub = (text) => { briefing.compose = async () => ({ text, facts: { includedWeight: false } }); };
 
-  await test('the check-in sends once, then reports already-sent (F5 hard cap)', async () => {
-    const s = new Store(tmpDir()).load();
-    let sends = 0;
-    checkin.compose = async () => 'You logged porridge and not much else yesterday. What does a good lunch look like this week?';
-    telegram.send = async () => { sends += 1; return 4242; };
+  // 07:30 America/Denver on a Wednesday. Denver is UTC-6 in September (MDT).
+  const at = (hhmm) => new Date(`2026-09-16T${hhmm}:00-06:00`);
 
-    const first = await checkin.run(s, CFG, {});
-    const second = await checkin.run(s, CFG, {});
-    const third = await checkin.run(s, CFG, {});
-
-    assert.strictEqual(first.status, 'sent');
-    assert.strictEqual(first.messageId, 4242);
-    assert.strictEqual(second.status, 'already-sent');
-    assert.strictEqual(third.status, 'already-sent');
-    assert.strictEqual(sends, 1, 'never more than one check-in a day');
-    assert.strictEqual(s.data.checkins.length, 1);
+  await test('the send time is read from config as time AND timezone', () => {
+    assert.deepStrictEqual(briefing.sendTime(CFG), { hour: 7, minute: 30 });
+    assert.strictEqual(briefing.zone(CFG), 'America/Denver');
+    assert.deepStrictEqual(briefing.sendTime({ briefing: { time: '06:05' } }), { hour: 6, minute: 5 });
+    // A malformed time must not silently become midnight.
+    assert.deepStrictEqual(briefing.sendTime({ briefing: { time: 'nonsense' } }), { hour: 7, minute: 30 });
   });
 
-  await test('the check-in links to the chat page', async () => {
+  await test('minutes are respected — 07:29 is not yet due, 07:30 is', () => {
     const s = new Store(tmpDir()).load();
-    checkin.compose = async () => 'Short line.';
-    telegram.send = async () => 1;
-    const out = await checkin.run(s, CFG, {});
-    assert.ok(out.text.includes(CFG.publicUrl), 'the ping must link back to the page');
+    assert.strictEqual(briefing.isDue(s, CFG, at('07:29')), false, '07:29 must not fire');
+    assert.strictEqual(briefing.isDue(s, CFG, at('07:30')), true);
+    assert.strictEqual(briefing.isDue(s, CFG, at('11:00')), true, 'a late wake-up still fires that day');
+  });
+
+  await test('the 20:00 evening send is retired — nothing fires the previous evening', () => {
+    const s = new Store(tmpDir()).load();
+    // 20:00 the night before is simply "not yet 07:30 on that day".
+    assert.strictEqual(briefing.isDue(s, CFG, new Date('2026-09-15T20:00:00-06:00')), true,
+      'note: 20:00 on the 15th is after 07:30 on the 15th, so the 15th is due');
+    // What matters is that once the 15th has been sent, the evening is silent.
+    s.addCheckin('2026-09-15', 'sent', true);
+    assert.strictEqual(briefing.isDue(s, CFG, new Date('2026-09-15T20:00:00-06:00')), false,
+      'no evening send exists any more');
+  });
+
+  await test('the timezone is the briefing timezone, not the app timezone', () => {
+    const s = new Store(tmpDir()).load();
+    const cfg = { ...CFG, timezone: 'Europe/London', briefing: { enabled: true, time: '07:30', timezone: 'America/Denver' } };
+    // 07:30 Denver is 14:30 London. If we measured in London this would misfire.
+    assert.strictEqual(briefing.isDue(s, cfg, new Date('2026-09-16T13:00:00Z')), false, '07:00 Denver — too early');
+    assert.strictEqual(briefing.isDue(s, cfg, new Date('2026-09-16T13:35:00Z')), true, '07:35 Denver — due');
+  });
+
+  await test('the briefing carries the three locked items, in order', () => {
+    const s = new Store(tmpDir()).load();
+    s.addMeal({ ts: new Date(at('07:30').getTime() - 86400000).toISOString(), description: 'chilli', mealType: 'dinner', nutrition: { calories_kcal: 600 } });
+    const f = briefing.assemble(s, CFG, at('07:30'));
+    assert.ok(f.stretchLine && /minutes/.test(f.stretchLine), 'stretch line first');
+    assert.ok(f.suggestion && f.suggestion.outlet.label, 'one workout suggestion second');
+    assert.ok(/chilli/.test(f.foodLine), "yesterday's food third");
+  });
+
+  await test('a day with nothing logged says so without reproach', () => {
+    const s = new Store(tmpDir()).load();
+    const f = briefing.assemble(s, CFG, at('07:30'));
+    assert.ok(/nothing logged yesterday/i.test(f.foodLine));
+    assert.ok(!/should|missed|why|behind|only/i.test(f.foodLine), `reproachful: "${f.foodLine}"`);
+  });
+
+  await test('weight appears at most weekly, tracked rather than assumed', () => {
+    const s = new Store(tmpDir()).load();
+    s.addWeight({ lb: 212 });
+    const first = briefing.assemble(s, CFG, at('07:30'));
+    assert.ok(first.weightLine, 'the first briefing after a reading may mention it');
+    assert.strictEqual(first.includedWeight, true);
+
+    const row = s.addCheckin('2026-09-16', 'sent', true);
+    row.includedWeight = true;
+    const nextDay = briefing.assemble(s, CFG, new Date('2026-09-17T07:30:00-06:00'));
+    assert.strictEqual(nextDay.weightLine, null, 'not two days running');
+
+    const weekLater = briefing.assemble(s, CFG, new Date('2026-09-24T07:30:00-06:00'));
+    assert.ok(weekLater.weightLine, 'a week later it may appear again');
+  });
+
+  await test('with no weight logged at all, weight is simply absent', () => {
+    const s = new Store(tmpDir()).load();
+    assert.strictEqual(briefing.assemble(s, CFG, at('07:30')).weightLine, null);
+  });
+
+  await test("Sunday gets the week's movement line; other days do not", () => {
+    const s = new Store(tmpDir()).load();
+    s.addWorkout({ outletId: 'dog-walk', outletLabel: 'Walking the dogs', durationMinutes: 30 });
+    const sun = briefing.assemble(s, CFG, new Date('2026-09-20T07:30:00-06:00'));
+    const wed = briefing.assemble(s, CFG, at('07:30'));
+    assert.strictEqual(sun.dayOfWeek, 'Sunday');
+    assert.ok(sun.weekLine, 'Sunday carries the week line');
+    assert.strictEqual(wed.weekLine, null, 'Wednesday does not');
+  });
+
+  await test('the briefing sends once, then reports already-sent — the cap survives the move', async () => {
+    const s = new Store(tmpDir()).load();
+    let sends = 0;
+    stub('Hips first, then the bike if you fancy it. Chilli last night, about 600 kcal.');
+    telegram.send = async () => { sends += 1; return 900; };
+
+    const a = await briefing.run(s, CFG, {});
+    const b = await briefing.run(s, CFG, {});
+    const c = await briefing.run(s, CFG, {});
+    assert.strictEqual(a.status, 'sent');
+    assert.strictEqual(a.messageId, 900);
+    assert.strictEqual(b.status, 'already-sent');
+    assert.strictEqual(c.status, 'already-sent');
+    assert.strictEqual(sends, 1, 'exactly one outbound message per day');
   });
 
   await test('a failed send still consumes the day — a miss, never a duplicate', async () => {
     const s = new Store(tmpDir()).load();
     let sends = 0;
-    checkin.compose = async () => 'Short line.';
+    stub('Short one.');
     telegram.send = async () => { sends += 1; throw new Error('Telegram unreachable'); };
-
-    const first = await checkin.run(s, CFG, {});
-    const second = await checkin.run(s, CFG, {});
-
-    assert.strictEqual(first.status, 'error');
-    assert.strictEqual(second.status, 'already-sent', 'a failure must not licence a retry that day');
+    const a = await briefing.run(s, CFG, {});
+    const b = await briefing.run(s, CFG, {});
+    assert.strictEqual(a.status, 'error');
+    assert.strictEqual(b.status, 'already-sent');
     assert.strictEqual(sends, 1);
-    assert.strictEqual(s.data.checkins[0].ok, false);
   });
 
   await test('a dry run composes without sending or claiming the day', async () => {
     const s = new Store(tmpDir()).load();
     let sends = 0;
-    checkin.compose = async () => 'Short line.';
+    stub('Short one.');
     telegram.send = async () => { sends += 1; return 1; };
-
-    const out = await checkin.run(s, CFG, { dryRun: true });
+    const out = await briefing.run(s, CFG, { dryRun: true });
     assert.strictEqual(out.status, 'dry-run');
     assert.strictEqual(sends, 0);
-    assert.strictEqual(s.data.checkins.length, 0, 'a rehearsal must not burn the day');
+    assert.strictEqual(s.data.checkins.length, 0);
+  });
+
+  await test('the briefing links to the page', async () => {
+    const s = new Store(tmpDir()).load();
+    stub('Short one.');
+    telegram.send = async () => 1;
+    const out = await briefing.run(s, CFG, {});
+    assert.ok(out.text.includes(CFG.publicUrl));
   });
 
   await test('an empty composition sends nothing', async () => {
     const s = new Store(tmpDir()).load();
     let sends = 0;
-    checkin.compose = async () => '   ';
+    stub('   ');
     telegram.send = async () => { sends += 1; return 1; };
-    const out = await checkin.run(s, CFG, {});
+    const out = await briefing.run(s, CFG, {});
     assert.strictEqual(out.status, 'error');
     assert.strictEqual(sends, 0);
     assert.strictEqual(s.data.checkins.length, 0);
   });
 
-  await test('isDue respects the configured hour and the once-a-day cap', () => {
-    const s = new Store(tmpDir()).load();
-    const at = (h) => new Date(`2026-07-01T${String(h).padStart(2, '0')}:05:00+01:00`);
-    assert.strictEqual(checkin.isDue(s, CFG, at(19)), false, 'not yet 20:00 local');
-    assert.strictEqual(checkin.isDue(s, CFG, at(20)), true);
-    assert.strictEqual(checkin.isDue(s, CFG, at(23)), true, 'a missed hour still fires later the same day');
-    s.addCheckin(localDate(at(20), CFG.timezone), 'sent', true);
-    assert.strictEqual(checkin.isDue(s, CFG, at(21)), false, 'already sent today');
-  });
-
-  checkin.compose = realCompose;
+  briefing.compose = realCompose;
   telegram.send = realSend;
 }
 
@@ -738,7 +807,7 @@ async function serverTests() {
       ...process.env,
       HEALTHCOACH_PORT: String(port),
       HEALTHCOACH_DATA_DIR: dir,
-      HEALTHCOACH_CHECKIN_ENABLED: '0', // a test run must never ping the owner
+      HEALTHCOACH_BRIEFING_ENABLED: '0', // a test run must never ping the owner
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -755,6 +824,9 @@ async function serverTests() {
       assert.strictEqual(d.service, 'healthcoach');
       assert.strictEqual(d.onboarded, false);
       assert.strictEqual(typeof d.telegramConfigured, 'boolean', 'presence, not the value');
+      assert.strictEqual(d.briefing.time, '07:30', 'the send time is explicit');
+      assert.strictEqual(d.briefing.timezone, 'America/Denver');
+      assert.ok(!('checkin' in d), 'the retired evening check-in must be gone from the API');
       assert.ok(!/sk-ant|bot[0-9]{6,}:/.test(r.body), 'no credential shape may appear in the payload');
     });
 
@@ -902,7 +974,7 @@ async function main() {
   await movementTests();
   await weightTests();
   await noGuiltTests();
-  await checkinTests();
+  await briefingTests();
   await serverTests();
 
   console.log(`\n${passed} passed, ${failures.length} failed`);
