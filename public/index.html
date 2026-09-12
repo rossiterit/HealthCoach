@@ -118,6 +118,26 @@
   .suggestion .cue { font-size: 14px; }
   .suggestion .why { font-size: 13px; color: var(--muted); font-style: italic; margin-top: 6px; }
 
+  /* Sunday's meal-plan prompt. A card on the page, never a push — the
+     one-touch-per-day rule stands, so this waits until the owner opens the app. */
+  .prompt-card {
+    background: var(--paper2); border: 1px solid var(--line); border-top: 3px solid var(--ac-plum);
+    border-radius: 12px; padding: 13px 16px; margin-bottom: 18px;
+  }
+  .prompt-card .n { font-size: 10px; letter-spacing: .14em; text-transform: uppercase; color: var(--muted); }
+  .prompt-card h3 { font-family: var(--serif); font-size: 16px; font-weight: 600; margin: 3px 0 4px; }
+  .prompt-card p { font-size: 13px; color: var(--muted); margin-bottom: 10px; }
+  .prompt-card button {
+    font-family: var(--sans); font-size: 10px; letter-spacing: .12em; text-transform: uppercase;
+    color: #f4ece0; background: #3a2e22; border: 1px solid #2b2118; border-radius: 999px;
+    padding: 6px 16px; cursor: pointer;
+  }
+  .prompt-card button:hover { background: #2b2118; }
+  .prompt-card .dismiss {
+    background: none; border: none; color: var(--muted); text-transform: none;
+    letter-spacing: 0; font-size: 12px; padding: 6px 8px;
+  }
+
   .safety {
     border-left: 3px solid var(--ac-clay); padding: 8px 0 8px 12px; margin: 4px 0 18px;
     font-size: 13px; color: var(--muted);
@@ -226,6 +246,7 @@
 
 <main id="main">
   <div class="view wrap" id="view-chat" role="tabpanel">
+    <div id="promptSlot"></div>
     <div id="transcript"></div>
   </div>
   <div class="view wrap" id="view-stretch" role="tabpanel" hidden></div>
@@ -357,6 +378,7 @@ async function boot() {
   try {
     const h = await (await fetch(API + '/health')).json();
     setState(true, h.onboarded ? 'ready' : 'first conversation');
+    if (h.mealPlanPrompt) showMealPlanPrompt();
   } catch {
     setState(false, 'offline');
   }
@@ -416,6 +438,28 @@ async function send() {
     scroll();
     input.focus();
   }
+}
+
+// --- Sunday's meal-plan prompt --------------------------------------------
+// Deliberately a card the owner finds when they open the app, not a message
+// that arrives. F6 is explicit that this must not become a second daily push.
+function showMealPlanPrompt() {
+  const slot = $('promptSlot');
+  const card = el('div', 'prompt-card');
+  card.appendChild(el('div', 'n', 'Sunday'));
+  card.appendChild(el('h3', null, 'Fancy a plan for the week?'));
+  card.appendChild(el('p', null, 'Drafted from what you have actually been eating, with a shopping list. Only if it is useful — skipping it costs nothing.'));
+  const go = el('button', null, 'Draft one');
+  go.addEventListener('click', () => {
+    slot.textContent = '';
+    input.value = 'Draft me a meal plan for this week, with a shopping list.';
+    send();
+  });
+  const no = el('button', 'dismiss', 'Not this week');
+  no.addEventListener('click', () => { slot.textContent = ''; });
+  card.appendChild(go);
+  card.appendChild(no);
+  slot.appendChild(card);
 }
 
 // --- tabs -----------------------------------------------------------------
