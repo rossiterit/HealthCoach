@@ -26,7 +26,8 @@ const path = require('path');
 
 const { load } = require('./lib/config');
 const { Store, localDate } = require('./lib/store');
-const dietcoach = require('./lib/dietcoach');
+const coach = require('./lib/coach');
+const stretch = require('./lib/stretch');
 const checkin = require('./lib/checkin');
 const nutrition = require('./lib/nutrition');
 const telegram = require('./lib/telegram');
@@ -103,6 +104,15 @@ function publicMeal(m) {
   };
 }
 
+/**
+ * A logged row as the API and the page see it. Dispatches on `kind` so a module
+ * can add a row type without every caller learning about it.
+ */
+function publicEntry(row) {
+  if (row.kind === 'meal' || row.mealType) return { ...publicMeal(row), kind: 'meal' };
+  return { ...row, date: localDate(row.ts, cfg.timezone) };
+}
+
 // ---------------------------------------------------------------------------
 // routes
 // ---------------------------------------------------------------------------
@@ -148,11 +158,11 @@ async function route(req, res, url) {
     if (!message) return send(res, 400, { error: 'Send a non-empty "message".' });
 
     try {
-      const out = await dietcoach.turn(store, cfg, message);
+      const out = await coach.turn(store, cfg, message);
       return send(res, 200, {
         reply: out.reply,
-        logged: out.logged.map(publicMeal),
-        corrected: out.corrected.map(publicMeal),
+        logged: out.logged.map(publicEntry),
+        corrected: out.corrected.map(publicEntry),
         goalsUpdated: out.goalsUpdated,
       });
     } catch (e) {
@@ -160,6 +170,18 @@ async function route(req, res, url) {
       console.error('[chat]', e.message);
       return send(res, 502, { error: e.message });
     }
+  }
+
+  // --- the stretch routine (F2, GOTK-159) ---
+  if (method === 'GET' && p === '/api/stretch') {
+    const which = url.searchParams.get('variant');
+    const routine = which ? stretch.variant(which) : stretch.daily();
+    if (!routine) return send(res, 404, { error: `No stretch variant called "${which}".` });
+    return send(res, 200, {
+      routine,
+      variants: stretch.variantNames(),
+      safetyNote: stretch.SAFETY_NOTE,
+    });
   }
 
   // --- goals doc (F2) ---

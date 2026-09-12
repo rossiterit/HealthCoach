@@ -27,6 +27,8 @@ const { Store, localDate } = require(path.join(ROOT, 'lib/store'));
 const nutrition = require(path.join(ROOT, 'lib/nutrition'));
 const secrets = require(path.join(ROOT, 'lib/secrets'));
 const dietcoach = require(path.join(ROOT, 'lib/dietcoach'));
+const coach = require(path.join(ROOT, 'lib/coach'));
+const stretch = require(path.join(ROOT, 'lib/stretch'));
 const checkin = require(path.join(ROOT, 'lib/checkin'));
 const telegram = require(path.join(ROOT, 'lib/telegram'));
 
@@ -239,18 +241,30 @@ async function toolTests() {
     assert.deepStrictEqual(s.getGoals().constraints, ['shellfish allergy']);
   });
 
-  await test('the coach is given exactly three tools, all writing to its own store', () => {
-    // Governance: no self-modification path exists. If this fails, someone added
-    // a capability that needs owner change control, not a code review.
-    const names = dietcoach.TOOLS.map((t) => t.name).sort();
+  await test('the whole tool surface is the ratified list, and every tool writes only to the store', () => {
+    // Governance. If this fails, someone added a capability that needs owner
+    // change control, not a code review. v2's log_workout/log_weight were
+    // ratified by the owner on 2026-09-12 as same-class store writes; the
+    // frozen thing is external access (calendar, APIs) per Decision 8.
+    const names = coach.allTools().map((t) => t.name).sort();
     assert.deepStrictEqual(names, ['correct_meal', 'log_meal', 'save_goals']);
+    for (const t of coach.allTools()) {
+      assert.ok(coach.ownerOf(t.name), `${t.name} must belong to a module`);
+    }
+  });
+
+  await test('no tool reaches outside the app', () => {
+    const forbidden = /\b(file|path|read_file|write_file|exec|shell|bash|command|http|fetch|url|calendar|email)\b/i;
+    for (const t of coach.allTools()) {
+      assert.ok(!forbidden.test(t.name), `tool name ${t.name} looks like external access`);
+    }
   });
 
   await test('the system prompt carries the goals doc and the day so far', () => {
     const s = new Store(tmpDir()).load();
     s.setGoals({ summary: 'More protein, less faff.', targets: { protein_g_per_day: 130 } });
     s.addMeal({ description: 'porridge', mealType: 'breakfast', nutrition: { calories_kcal: 300 } });
-    const sys = dietcoach.buildSystem(s, CFG);
+    const sys = coach.buildSystem(s, CFG);
     assert.ok(sys.includes('More protein, less faff.'), 'goals must be in the frame');
     assert.ok(sys.includes('protein_g_per_day: 130'));
     assert.ok(sys.includes('porridge'), 'recent meals must be in the frame');
@@ -259,8 +273,112 @@ async function toolTests() {
 
   await test('with no goals doc, the prompt runs the onboarding interview (F2)', () => {
     const s = new Store(tmpDir()).load();
-    const sys = dietcoach.buildSystem(s, CFG);
+    const sys = coach.buildSystem(s, CFG);
     assert.ok(sys.includes('ONBOARDING INTERVIEW'), 'the first conversation must interview');
+  });
+}
+
+// ---------------------------------------------------------------------------
+// the stretch routine (GOTK-159)
+// ---------------------------------------------------------------------------
+
+async function stretchTests() {
+  await test('the daily routine is a real ~10-minute sequence with named movements', () => {
+    const r = stretch.daily();
+    assert.ok(r.steps.length >= 6, 'a ten-minute routine needs more than a couple of movements');
+    assert.strictEqual(r.totalMinutes, 10);
+    for (const st of r.steps) {
+      assert.ok(st.name && st.name.length > 2, 'every movement is named');
+      assert.ok(/second|minute/.test(st.duration), `${st.name} needs a duration`);
+      assert.ok(st.cue && st.cue.length > 20, `${st.name} needs a usable cue`);
+    }
+  });
+
+  await test('variants are subsets of the same movements, never invented ones', () => {
+    const dailyNames = new Set(stretch.daily().steps.map((s) => s.name));
+    for (const name of stretch.variantNames()) {
+      const v = stretch.variant(name);
+      assert.ok(v, `variant ${name} should resolve`);
+      assert.ok(v.steps.length, `variant ${name} should have steps`);
+      for (const st of v.steps) {
+        assert.ok(dailyNames.has(st.name), `variant ${name} invented a movement: ${st.name}`);
+      }
+      assert.ok(v.totalMinutes <= stretch.daily().totalMinutes, 'a variant should not be longer');
+    }
+  });
+
+  await test('an unknown variant resolves to null rather than something made up', () => {
+    assert.strictEqual(stretch.variant('nonsense'), null);
+    assert.strictEqual(stretch.variant(''), null);
+  });
+
+  await test('stretches can be looked up by loose name, for "explain the figure four"', () => {
+    assert.ok(stretch.findStep('figure four'));
+    assert.ok(stretch.findStep('Figure-Four'));
+    assert.ok(stretch.findStep('glute bridge'));
+    assert.strictEqual(stretch.findStep('bench press'), null);
+  });
+
+  await test('the safety note names pain and points at a professional', () => {
+    const note = stretch.SAFETY_NOTE.toLowerCase();
+    assert.ok(/not physical therapy/.test(note), 'must disclaim physical therapy');
+    assert.ok(/physio|professional|doctor/.test(note), 'must point somewhere real');
+    assert.ok(/hurt|pain/.test(note), 'must distinguish pain from tightness');
+  });
+
+  await test('the fitness persona forbids working around pain', () => {
+    const fit = require(path.join(ROOT, 'lib/fitnesscoach'));
+    const persona = fit.persona().toLowerCase();
+    assert.ok(/pain/.test(persona));
+    assert.ok(/physio|doctor/.test(persona), 'the coach must refer pain onward');
+    assert.ok(/not physical therapy/.test(persona));
+  });
+
+  await test('the briefing line is one line, not the whole routine', () => {
+    const line = stretch.briefingLine();
+    assert.ok(!line.includes('\n'), 'the briefing gets a line, not a list');
+    assert.ok(line.length < 120);
+  });
+}
+
+// ---------------------------------------------------------------------------
+// the no-guilt guard — the binding design principle of v2
+// ---------------------------------------------------------------------------
+
+async function noGuiltTests() {
+  // Concept words only. Generic English ("only", "just") is excluded on purpose:
+  // banning it would produce false failures and teach people to skip this test.
+  const BANNED = [
+    /\bstreaks?\b/i,
+    /\bconsecutive\b/i,
+    /\bin a row\b/i,
+    /\bdays since\b/i,
+    /\bmissed?\s+(a\s+)?(day|days|workout|session)\b/i,
+    /\bkeep it going\b/i,
+    /\bdon'?t break\b/i,
+  ];
+
+  await test('the coach prompt bans streaks, misses and consecutive-day counts outright', () => {
+    const base = coach.BASE_PERSONA;
+    assert.ok(/no streaks/i.test(base) || /there are no streaks/i.test(base), 'the ban must be explicit');
+    assert.ok(/consecutive-day counts/i.test(base));
+    assert.ok(/never count or refer to misses/i.test(base), 'misses must be banned, not just streaks');
+    assert.ok(/every day starts fresh/i.test(base));
+    assert.ok(/at least/i.test(base), 'the prompt should name the softened-shaming phrasings it bans');
+  });
+
+  await test('the page contains no streak, miss or consecutive-day language', () => {
+    const page = fs.readFileSync(path.join(ROOT, 'public/index.html'), 'utf8');
+    for (const re of BANNED) {
+      assert.ok(!re.test(page), `the page must not contain ${re}`);
+    }
+  });
+
+  await test('the stretch content contains none of it either', () => {
+    const blob = JSON.stringify(stretch.daily()) + stretch.promptSummary() + stretch.SAFETY_NOTE;
+    for (const re of BANNED) {
+      assert.ok(!re.test(blob), `stretch content must not contain ${re}`);
+    }
   });
 }
 
@@ -269,13 +387,13 @@ async function toolTests() {
 // ---------------------------------------------------------------------------
 
 async function checkinTests() {
-  const realCompose = dietcoach.composeCheckin;
+  const realCompose = checkin.compose;
   const realSend = telegram.send;
 
   await test('the check-in sends once, then reports already-sent (F5 hard cap)', async () => {
     const s = new Store(tmpDir()).load();
     let sends = 0;
-    dietcoach.composeCheckin = async () => 'You logged porridge and not much else yesterday. What does a good lunch look like this week?';
+    checkin.compose = async () => 'You logged porridge and not much else yesterday. What does a good lunch look like this week?';
     telegram.send = async () => { sends += 1; return 4242; };
 
     const first = await checkin.run(s, CFG, {});
@@ -292,7 +410,7 @@ async function checkinTests() {
 
   await test('the check-in links to the chat page', async () => {
     const s = new Store(tmpDir()).load();
-    dietcoach.composeCheckin = async () => 'Short line.';
+    checkin.compose = async () => 'Short line.';
     telegram.send = async () => 1;
     const out = await checkin.run(s, CFG, {});
     assert.ok(out.text.includes(CFG.publicUrl), 'the ping must link back to the page');
@@ -301,7 +419,7 @@ async function checkinTests() {
   await test('a failed send still consumes the day — a miss, never a duplicate', async () => {
     const s = new Store(tmpDir()).load();
     let sends = 0;
-    dietcoach.composeCheckin = async () => 'Short line.';
+    checkin.compose = async () => 'Short line.';
     telegram.send = async () => { sends += 1; throw new Error('Telegram unreachable'); };
 
     const first = await checkin.run(s, CFG, {});
@@ -316,7 +434,7 @@ async function checkinTests() {
   await test('a dry run composes without sending or claiming the day', async () => {
     const s = new Store(tmpDir()).load();
     let sends = 0;
-    dietcoach.composeCheckin = async () => 'Short line.';
+    checkin.compose = async () => 'Short line.';
     telegram.send = async () => { sends += 1; return 1; };
 
     const out = await checkin.run(s, CFG, { dryRun: true });
@@ -328,7 +446,7 @@ async function checkinTests() {
   await test('an empty composition sends nothing', async () => {
     const s = new Store(tmpDir()).load();
     let sends = 0;
-    dietcoach.composeCheckin = async () => '   ';
+    checkin.compose = async () => '   ';
     telegram.send = async () => { sends += 1; return 1; };
     const out = await checkin.run(s, CFG, {});
     assert.strictEqual(out.status, 'error');
@@ -346,7 +464,7 @@ async function checkinTests() {
     assert.strictEqual(checkin.isDue(s, CFG, at(21)), false, 'already sent today');
   });
 
-  dietcoach.composeCheckin = realCompose;
+  checkin.compose = realCompose;
   telegram.send = realSend;
 }
 
@@ -467,6 +585,30 @@ async function serverTests() {
       assert.ok(JSON.parse(r.body).error);
     });
 
+    await test('GET /api/stretch serves the routine, its variants and the safety note', async () => {
+      const r = await get(port, '/api/stretch');
+      assert.strictEqual(r.status, 200);
+      const d = JSON.parse(r.body);
+      assert.ok(d.routine.steps.length >= 6);
+      assert.ok(d.variants.length >= 1);
+      assert.ok(/not physical therapy/i.test(d.safetyNote), 'the API must carry the caveat too');
+    });
+
+    await test('a stretch variant is served, and an unknown one 404s', async () => {
+      const short = JSON.parse((await get(port, '/api/stretch?variant=short')).body);
+      assert.ok(short.routine.steps.length < 8, 'the short variant should be shorter');
+      const bad = await get(port, '/api/stretch?variant=nonsense');
+      assert.strictEqual(bad.status, 404);
+    });
+
+    await test('the page carries Chat and Stretch tabs, with Chat selected', async () => {
+      const page = (await get(port, '/')).body;
+      assert.ok(page.includes('id="tab-chat"'));
+      assert.ok(page.includes('id="tab-stretch"'));
+      assert.ok(/id="tab-chat"[^>]*aria-selected="true"/.test(page), 'chat is the default view');
+      assert.ok(page.includes('id="view-stretch"'));
+    });
+
     await test('an unknown endpoint 404s as JSON', async () => {
       const r = await get(port, '/api/nope');
       assert.strictEqual(r.status, 404);
@@ -503,6 +645,8 @@ async function main() {
   await nutritionTests();
   await secretTests();
   await toolTests();
+  await stretchTests();
+  await noGuiltTests();
   await checkinTests();
   await serverTests();
 
