@@ -15,6 +15,16 @@
     "maxTokens": 12000,
     "historyTurns": 30
   },
+  "fitness": {
+    "_note": "The owner's real outlets. A MENU, never a calendar — nothing here is ever scheduled onto a date. dog-walk carries isFloor: it always counts, and the suggestion logic can never rank it out of reach.",
+    "outlets": [
+      { "id": "koko", "label": "Koko Fitness", "kind": "strength", "typicalMinutes": 45, "needs": "a trip out" },
+      { "id": "weights", "label": "Home free weights", "kind": "strength", "typicalMinutes": 30, "needs": "nothing" },
+      { "id": "stationary-bike", "label": "Stationary bike", "kind": "cardio", "typicalMinutes": 30, "needs": "nothing" },
+      { "id": "commuter-bike", "label": "Commuter bike", "kind": "cardio", "typicalMinutes": 40, "needs": "daylight and dry-ish weather" },
+      { "id": "dog-walk", "label": "Walking the dogs", "kind": "walk", "typicalMinutes": 30, "needs": "nothing", "isFloor": true }
+    ]
+  },
   "nutrition": {
     "engine": "estimate",
     "_note": "SnapCalorie descoped by owner 2026-09-10 (override of build-package Decision 10). Decision 10's own fallback clause applies: Claude's estimate, stored and echoed flagged as an estimate. Set engine to 'snapcalorie' and place a key to re-enable GOTK-156."

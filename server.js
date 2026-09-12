@@ -28,6 +28,7 @@ const { load } = require('./lib/config');
 const { Store, localDate } = require('./lib/store');
 const coach = require('./lib/coach');
 const stretch = require('./lib/stretch');
+const workouts = require('./lib/workouts');
 const checkin = require('./lib/checkin');
 const nutrition = require('./lib/nutrition');
 const telegram = require('./lib/telegram');
@@ -181,6 +182,22 @@ async function route(req, res, url) {
       routine,
       variants: stretch.variantNames(),
       safetyNote: stretch.SAFETY_NOTE,
+    });
+  }
+
+  // --- movement: the week's ledger and today's suggestion (F3/F4) ---
+  if (method === 'GET' && p === '/api/movement') {
+    const days = Math.min(Math.max(Number(url.searchParams.get('days') || 7), 1), 90);
+    const s = workouts.summary(store, cfg, days);
+    const pick = workouts.suggest(store, cfg);
+    return send(res, 200, {
+      // What WAS done. There is deliberately no streak, no active-day count and
+      // no gap anywhere in this payload — the page cannot render what it is
+      // never sent.
+      week: { days: s.days, count: s.count, totalMinutes: s.totalMinutes, byOutlet: s.byOutlet, entries: s.entries },
+      line: workouts.summaryLine(store, cfg, days),
+      suggestion: { outlet: pick.outlet, reason: pick.reason, tradeDown: pick.tradeDown },
+      outlets: workouts.outlets(cfg),
     });
   }
 

@@ -29,6 +29,8 @@ const secrets = require(path.join(ROOT, 'lib/secrets'));
 const dietcoach = require(path.join(ROOT, 'lib/dietcoach'));
 const coach = require(path.join(ROOT, 'lib/coach'));
 const stretch = require(path.join(ROOT, 'lib/stretch'));
+const workouts = require(path.join(ROOT, 'lib/workouts'));
+const fitnesscoach = require(path.join(ROOT, 'lib/fitnesscoach'));
 const checkin = require(path.join(ROOT, 'lib/checkin'));
 const telegram = require(path.join(ROOT, 'lib/telegram'));
 
@@ -47,6 +49,7 @@ function tmpDir() {
 
 const CFG = {
   timezone: 'Europe/London',
+  fitness: { outlets: workouts.DEFAULT_OUTLETS },
   nutrition: { engine: 'estimate' },
   checkin: { enabled: true, hourLocal: 20 },
   publicUrl: 'https://example.invalid/healthcoach/',
@@ -247,7 +250,7 @@ async function toolTests() {
     // ratified by the owner on 2026-09-12 as same-class store writes; the
     // frozen thing is external access (calendar, APIs) per Decision 8.
     const names = coach.allTools().map((t) => t.name).sort();
-    assert.deepStrictEqual(names, ['correct_meal', 'log_meal', 'save_goals']);
+    assert.deepStrictEqual(names, ['correct_meal', 'log_meal', 'log_workout', 'save_goals']);
     for (const t of coach.allTools()) {
       assert.ok(coach.ownerOf(t.name), `${t.name} must belong to a module`);
     }
@@ -342,6 +345,114 @@ async function stretchTests() {
 }
 
 // ---------------------------------------------------------------------------
+// the workout menu and the movement ledger (GOTK-160)
+// ---------------------------------------------------------------------------
+
+async function movementTests() {
+  const mon = new Date('2026-09-14T09:00:00Z'); // a Monday
+  const sat = new Date('2026-09-19T09:00:00Z'); // a Saturday
+
+  await test('the menu is the owner\'s real outlets, and the dog walk is the floor', () => {
+    const list = workouts.outlets(CFG);
+    const ids = list.map((o) => o.id).sort();
+    assert.deepStrictEqual(ids, ['commuter-bike', 'dog-walk', 'koko', 'stationary-bike', 'weights']);
+    const floor = workouts.floorOutlet(CFG);
+    assert.strictEqual(floor.id, 'dog-walk');
+    assert.strictEqual(list.filter((o) => o.isFloor).length, 1, 'exactly one floor');
+  });
+
+  await test('a suggestion is always one real outlet, never invented', () => {
+    const s = new Store(tmpDir()).load();
+    const valid = new Set(workouts.outlets(CFG).map((o) => o.id));
+    for (const now of [mon, sat]) {
+      const pick = workouts.suggest(s, CFG, now);
+      assert.ok(valid.has(pick.outlet.id), `suggested ${pick.outlet.id}, which is not on the menu`);
+      assert.ok(pick.reason && pick.reason.length > 3);
+    }
+  });
+
+  await test('the trade-down is always the floor, and the floor never trades down to itself', () => {
+    const s = new Store(tmpDir()).load();
+    const pick = workouts.suggest(s, CFG, mon);
+    if (pick.outlet.isFloor) assert.strictEqual(pick.tradeDown, null);
+    else assert.strictEqual(pick.tradeDown.id, 'dog-walk');
+  });
+
+  await test('the suggestion favours what actually gets done', () => {
+    const s = new Store(tmpDir()).load();
+    // Six stationary-bike sessions, none recent enough to be deprioritised.
+    for (let i = 4; i < 10; i++) {
+      s.addWorkout({ ts: new Date(mon.getTime() - i * 86400000).toISOString(), outletId: 'stationary-bike', outletLabel: 'Stationary bike' });
+    }
+    const pick = workouts.suggest(s, CFG, mon);
+    assert.strictEqual(pick.outlet.id, 'stationary-bike', 'the outlet they actually use should surface');
+  });
+
+  await test('variety: something done yesterday is not suggested again today', () => {
+    const s = new Store(tmpDir()).load();
+    for (let i = 3; i < 9; i++) {
+      s.addWorkout({ ts: new Date(mon.getTime() - i * 86400000).toISOString(), outletId: 'weights', outletLabel: 'Home free weights' });
+    }
+    s.addWorkout({ ts: new Date(mon.getTime() - 86400000).toISOString(), outletId: 'weights', outletLabel: 'Home free weights' });
+    const pick = workouts.suggest(s, CFG, mon);
+    assert.notStrictEqual(pick.outlet.id, 'weights', 'yesterday\'s outlet should step aside');
+  });
+
+  await test('no suggestion reason ever references elapsed time or a gap', () => {
+    const s = new Store(tmpDir()).load();
+    const banned = /\b(since|been a|haven'?t|last time|days? ago|a while|overdue|due for)\b/i;
+    for (const outlet of workouts.outlets(CFG)) {
+      for (const now of [mon, sat]) {
+        s.addWorkout({ ts: new Date(now.getTime() - 3 * 86400000).toISOString(), outletId: outlet.id, outletLabel: outlet.label });
+        const pick = workouts.suggest(s, CFG, now);
+        assert.ok(!banned.test(pick.reason), `reason narrates a gap: "${pick.reason}"`);
+      }
+    }
+  });
+
+  await test('log_workout records the dog walk exactly like anything else', () => {
+    const s = new Store(tmpDir()).load();
+    const walk = fitnesscoach.runTool(s, CFG, 'log_workout', { outlet: 'dog-walk', description: 'walked the dogs round the block' });
+    const gym = fitnesscoach.runTool(s, CFG, 'log_workout', { outlet: 'koko', description: 'full session', duration_minutes: 45 });
+    assert.ok(walk.logged, 'the walk must produce a row');
+    assert.strictEqual(walk.logged.outletId, 'dog-walk');
+    assert.strictEqual(walk.logged.kind, 'workout');
+    // Same shape, same table, no marker making one lesser than the other.
+    assert.deepStrictEqual(Object.keys(walk.logged).sort(), Object.keys(gym.logged).sort());
+    const lesser = /at least|better than nothing|only a|just a|instead of/i;
+    assert.ok(!lesser.test(walk.result), `the tool result diminishes the walk: "${walk.result}"`);
+  });
+
+  await test('the ledger reports what was done and stores no streak of any kind', () => {
+    const s = new Store(tmpDir()).load();
+    s.addWorkout({ ts: mon.toISOString(), outletId: 'dog-walk', outletLabel: 'Walking the dogs', durationMinutes: 30 });
+    s.addWorkout({ ts: mon.toISOString(), outletId: 'koko', outletLabel: 'Koko Fitness', durationMinutes: 45 });
+    const sum = workouts.summary(s, CFG, 7, new Date(mon.getTime() + 3600000));
+    assert.strictEqual(sum.count, 2);
+    assert.strictEqual(sum.totalMinutes, 75);
+    const keys = Object.keys(sum).concat(Object.keys(s.data.workouts[0]));
+    for (const k of keys) {
+      assert.ok(!/streak|chain|consecutive|miss/i.test(k), `the ledger must not carry a "${k}" field`);
+    }
+  });
+
+  await test('an empty week says so plainly, with no reproach', () => {
+    const s = new Store(tmpDir()).load();
+    const line = workouts.summaryLine(s, CFG, 7, mon);
+    assert.ok(/nothing recorded/i.test(line));
+    assert.ok(!/should|need to|missed|behind|only/i.test(line), `reproachful empty-week line: "${line}"`);
+  });
+
+  await test('the fitness persona bans gap narration and protects the floor', () => {
+    const p = fitnesscoach.persona();
+    assert.ok(/walking the dogs counts/i.test(p), 'the floor must be stated');
+    assert.ok(/at least you walked the dogs/i.test(p), 'the persona should name the phrasing it bans');
+    assert.ok(/menu, not a calendar|MENU, NOT A CALENDAR/i.test(p));
+    assert.ok(/never explain a suggestion by how long/i.test(p), 'gap narration must be banned');
+  });
+}
+
+// ---------------------------------------------------------------------------
 // the no-guilt guard — the binding design principle of v2
 // ---------------------------------------------------------------------------
 
@@ -368,10 +479,25 @@ async function noGuiltTests() {
   });
 
   await test('the page contains no streak, miss or consecutive-day language', () => {
-    const page = fs.readFileSync(path.join(ROOT, 'public/index.html'), 'utf8');
+    // Strip comments first. A JS comment saying "no streak here by design" is
+    // not user-visible, and failing on it would teach us to stop explaining
+    // ourselves rather than to stop shipping streaks.
+    const raw = fs.readFileSync(path.join(ROOT, 'public/index.html'), 'utf8');
+    const page = raw
+      .replace(/<!--[\s\S]*?-->/g, ' ')
+      .replace(/\/\*[\s\S]*?\*\//g, ' ')
+      .replace(/(^|[^:])\/\/.*$/gm, '$1 ');
     for (const re of BANNED) {
       assert.ok(!re.test(page), `the page must not contain ${re}`);
     }
+  });
+
+  await test('the movement prompt block narrates no gaps', () => {
+    const s = new Store(tmpDir()).load();
+    s.addWorkout({ ts: new Date(Date.now() - 6 * 86400000).toISOString(), outletId: 'koko', outletLabel: 'Koko Fitness' });
+    const blob = workouts.promptSummary(s, CFG);
+    for (const re of BANNED) assert.ok(!re.test(blob), `movement prompt contains ${re}`);
+    assert.ok(!/\bsince\b|\bdays ago\b/i.test(blob), 'no elapsed-time narration');
   });
 
   await test('the stretch content contains none of it either', () => {
@@ -609,6 +735,22 @@ async function serverTests() {
       assert.ok(page.includes('id="view-stretch"'));
     });
 
+    await test('GET /api/movement reports what was done, and sends no streak fields', async () => {
+      const r = await get(port, '/api/movement');
+      assert.strictEqual(r.status, 200);
+      const d = JSON.parse(r.body);
+      assert.strictEqual(d.week.count, 0);
+      assert.ok(d.suggestion.outlet.id, 'a suggestion is always offered');
+      assert.ok(d.outlets.some((o) => o.isFloor), 'the floor is on the menu');
+      assert.ok(!/streak|consecutive|"?miss|daysActive/i.test(r.body), 'the payload must carry no streak concept');
+    });
+
+    await test('the page carries the Trend tab', async () => {
+      const page = (await get(port, '/')).body;
+      assert.ok(page.includes('id="tab-trend"'));
+      assert.ok(page.includes('id="view-trend"'));
+    });
+
     await test('an unknown endpoint 404s as JSON', async () => {
       const r = await get(port, '/api/nope');
       assert.strictEqual(r.status, 404);
@@ -646,6 +788,7 @@ async function main() {
   await secretTests();
   await toolTests();
   await stretchTests();
+  await movementTests();
   await noGuiltTests();
   await checkinTests();
   await serverTests();
