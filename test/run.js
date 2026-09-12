@@ -536,6 +536,64 @@ async function weightTests() {
 }
 
 // ---------------------------------------------------------------------------
+// weekly meal planning (GOTK-162)
+// ---------------------------------------------------------------------------
+
+async function mealPlanTests() {
+  await test('the plan is drafted from what they actually eat, repeats surfaced first', () => {
+    const s = new Store(tmpDir()).load();
+    const n = Date.now();
+    ['porridge', 'porridge', 'porridge', 'eggs on toast'].forEach((d, i) =>
+      s.addMeal({ ts: new Date(n - i * 86400000).toISOString(), description: d, mealType: 'breakfast' }));
+    s.addMeal({ ts: new Date(n - 2 * 86400000).toISOString(), description: 'chicken burrito bowl', mealType: 'dinner' });
+    const block = dietcoach.patternBlock(s, CFG);
+    assert.ok(/porridge \(x3\)/.test(block), 'a repeat should be counted so the plan can lean on it');
+    assert.ok(/breakfast:/.test(block) && /dinner:/.test(block), 'grouped by meal type');
+    assert.ok(/5 meals logged/.test(block));
+  });
+
+  await test('with nothing logged, the coach is told to ask rather than invent a week', () => {
+    const s = new Store(tmpDir()).load();
+    const block = dietcoach.patternBlock(s, CFG);
+    assert.ok(/ask them what a normal week looks like/i.test(block));
+  });
+
+  await test('the pattern block describes, and never compares to a target', () => {
+    const s = new Store(tmpDir()).load();
+    s.addMeal({ description: 'pizza', mealType: 'dinner', nutrition: { calories_kcal: 1200 } });
+    const block = dietcoach.patternBlock(s, CFG);
+    assert.ok(!/should|too much|over|under|target|excess|instead/i.test(block),
+      `the pattern block editorialises: "${block}"`);
+  });
+
+  await test('the persona requires a shopping list and forbids an idealised plan', () => {
+    const s = new Store(tmpDir()).load();
+    s.setGoals({ summary: 'x' });
+    const p = dietcoach.persona(s);
+    assert.ok(/SHOPPING LIST/.test(p), 'a plan must produce a shopping list');
+    assert.ok(/what they ACTUALLY eat/i.test(p));
+    assert.ok(/allergies are hard limits/i.test(p));
+    assert.ok(/nothing in it is owed/i.test(p), 'a plan must not become an obligation');
+  });
+
+  await test('the healthifier returns a cookable recipe, not a critique', () => {
+    const s = new Store(tmpDir()).load();
+    s.setGoals({ summary: 'x' });
+    const p = dietcoach.persona(s);
+    assert.ok(/Return the whole recipe rewritten/i.test(p));
+    assert.ok(/say WHAT you changed and WHY/i.test(p));
+    assert.ok(/recognisably itself/i.test(p), 'it must not turn the dish into something else');
+  });
+
+  await test('meal planning adds no new tool — it is conversation, not a capability', () => {
+    // The owner ratified log_workout and log_weight specifically. A plan lives
+    // in the chat, so F6 needs no further grant.
+    const names = coach.allTools().map((t) => t.name).sort();
+    assert.deepStrictEqual(names, ['correct_meal', 'log_meal', 'log_weight', 'log_workout', 'save_goals']);
+  });
+}
+
+// ---------------------------------------------------------------------------
 // the no-guilt guard — the binding design principle of v2
 // ---------------------------------------------------------------------------
 
@@ -934,6 +992,17 @@ async function serverTests() {
       assert.ok(/var\(--ink\)/.test(sparkCss), 'the line is drawn in plain ink');
     });
 
+    await test('the Sunday meal-plan prompt is a page card, never a push', async () => {
+      const h = JSON.parse((await get(port, '/api/health')).body);
+      assert.strictEqual(typeof h.mealPlanPrompt, 'boolean', 'the page is told whether to show it');
+      const page = (await get(port, '/')).body;
+      assert.ok(page.includes('showMealPlanPrompt'), 'the card exists');
+      assert.ok(page.includes('id="promptSlot"'));
+      // It must be reachable only from the page, never from the briefing path.
+      const brief = fs.readFileSync(path.join(ROOT, 'lib/briefing.js'), 'utf8');
+      assert.ok(!/meal ?plan/i.test(brief), 'the briefing must not carry the meal-plan prompt');
+    });
+
     await test('an unknown endpoint 404s as JSON', async () => {
       const r = await get(port, '/api/nope');
       assert.strictEqual(r.status, 404);
@@ -973,6 +1042,7 @@ async function main() {
   await stretchTests();
   await movementTests();
   await weightTests();
+  await mealPlanTests();
   await noGuiltTests();
   await briefingTests();
   await serverTests();

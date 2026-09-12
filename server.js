@@ -150,6 +150,10 @@ async function route(req, res, url) {
       // Presence, never the value — the confidentiality floor applies to a
       // health endpoint as much as to a log.
       telegramConfigured: telegram.configured(cfg),
+      // Sunday's meal-plan prompt is a card ON THE PAGE, never an extra push —
+      // the one-touch-per-day rule stands (F6).
+      mealPlanPrompt:
+        new Intl.DateTimeFormat('en-GB', { timeZone: cfg.timezone, weekday: 'long' }).format(new Date()) === 'Sunday',
     });
   }
 
