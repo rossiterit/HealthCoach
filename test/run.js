@@ -30,6 +30,7 @@ const dietcoach = require(path.join(ROOT, 'lib/dietcoach'));
 const coach = require(path.join(ROOT, 'lib/coach'));
 const stretch = require(path.join(ROOT, 'lib/stretch'));
 const workouts = require(path.join(ROOT, 'lib/workouts'));
+const weight = require(path.join(ROOT, 'lib/weight'));
 const fitnesscoach = require(path.join(ROOT, 'lib/fitnesscoach'));
 const checkin = require(path.join(ROOT, 'lib/checkin'));
 const telegram = require(path.join(ROOT, 'lib/telegram'));
@@ -250,7 +251,7 @@ async function toolTests() {
     // ratified by the owner on 2026-09-12 as same-class store writes; the
     // frozen thing is external access (calendar, APIs) per Decision 8.
     const names = coach.allTools().map((t) => t.name).sort();
-    assert.deepStrictEqual(names, ['correct_meal', 'log_meal', 'log_workout', 'save_goals']);
+    assert.deepStrictEqual(names, ['correct_meal', 'log_meal', 'log_weight', 'log_workout', 'save_goals']);
     for (const t of coach.allTools()) {
       assert.ok(coach.ownerOf(t.name), `${t.name} must belong to a module`);
     }
@@ -453,6 +454,88 @@ async function movementTests() {
 }
 
 // ---------------------------------------------------------------------------
+// weight — trend, never verdict (GOTK-161)
+// ---------------------------------------------------------------------------
+
+async function weightTests() {
+  const now = new Date('2026-09-20T14:00:00Z');
+  const seed = (vals) => {
+    const s = new Store(tmpDir()).load();
+    vals.forEach((lb, i) => s.addWeight({ ts: new Date(now.getTime() - (vals.length - 1 - i) * 86400000).toISOString(), lb }));
+    return s;
+  };
+
+  await test('weight is stored in pounds, rounded to one decimal', () => {
+    const s = new Store(tmpDir()).load();
+    const row = s.addWeight({ lb: 212.44 });
+    assert.strictEqual(row.lb, 212.4);
+    assert.ok(!('kg' in row), 'the kg field is gone; pounds end to end');
+  });
+
+  await test('a stored reading carries no verdict, target or delta', () => {
+    const s = new Store(tmpDir()).load();
+    const row = s.addWeight({ lb: 212 });
+    for (const k of Object.keys(row)) {
+      assert.ok(!/target|goal|delta|change|verdict|status|onTrack/i.test(k), `a reading must not carry "${k}"`);
+    }
+  });
+
+  await test('one reading is a reading, not a trend', () => {
+    const t = weight.trend(seed([212]), CFG, 7, now);
+    assert.strictEqual(t.enough, false);
+    assert.strictEqual(t.direction, null);
+    assert.strictEqual(t.changeLb, null);
+    assert.ok(/one reading/i.test(weight.line(seed([212]), CFG, 7, now)));
+  });
+
+  await test('a falling window reads down, a rising one up — with no adjective attached', () => {
+    const down = weight.trend(seed([214, 213.4, 213.8, 212.9, 212.2, 212.6, 211.8]), CFG, 7, now);
+    assert.strictEqual(down.direction, 'down');
+    assert.ok(down.changeLb < 0);
+    const up = weight.trend(seed([208, 208.6, 209.1, 209, 209.8, 210.2, 210.6]), CFG, 7, now);
+    assert.strictEqual(up.direction, 'up');
+    // Neither direction may carry a valence word anywhere in the sentence.
+    const valence = /good|bad|great|well done|nice|unfortunately|worry|slipping|progress|behind|on track/i;
+    for (const days of [7, 30]) {
+      assert.ok(!valence.test(weight.line(seed([214, 213, 212, 211]), CFG, days, now)), 'a fall must not be praised');
+      assert.ok(!valence.test(weight.line(seed([208, 209, 210, 211]), CFG, days, now)), 'a rise must not be judged');
+    }
+  });
+
+  await test('noise inside a quarter pound reads level, not as a direction', () => {
+    const t = weight.trend(seed([212.0, 212.1, 211.9, 212.05]), CFG, 7, now);
+    assert.strictEqual(t.direction, 'level');
+    assert.ok(/holding around/i.test(weight.line(seed([212.0, 212.1, 211.9, 212.05]), CFG, 7, now)));
+  });
+
+  await test('the window comparison averages halves rather than diffing two points', () => {
+    // A single spiky reading at the start must not be read as a big fall.
+    const spiky = weight.trend(seed([218, 212, 212, 212, 212, 212]), CFG, 7, now);
+    const clean = weight.trend(seed([212, 212, 212, 212, 212, 206]), CFG, 7, now);
+    assert.ok(Math.abs(spiky.changeLb) < 6, 'one high reading must not become a 6 lb story');
+    assert.ok(Math.abs(clean.changeLb) > 0, 'a real move should still register');
+  });
+
+  await test('the weight persona forbids congratulating, reassuring or comparing', () => {
+    const p = fitnesscoach.persona().toLowerCase();
+    assert.ok(/scale moment belongs to them/i.test(fitnesscoach.persona()));
+    assert.ok(/do not congratulate/.test(p));
+    assert.ok(/never volunteer the trend/.test(p));
+    assert.ok(/approval and consolation are both verdicts/.test(p));
+    assert.ok(/never suggest they weigh themselves/.test(p));
+  });
+
+  await test('logging a weight returns a flat acknowledgement with no direction in it', () => {
+    const s = seed([214, 213, 212]);
+    const out = fitnesscoach.runTool(s, CFG, 'log_weight', { lb: 211 });
+    assert.strictEqual(out.logged.kind, 'weight');
+    assert.strictEqual(out.logged.lb, 211);
+    assert.ok(!/down|up|less|more|lower|higher|good|nice|progress/i.test(out.result),
+      `the tool result editorialises: "${out.result}"`);
+  });
+}
+
+// ---------------------------------------------------------------------------
 // the no-guilt guard — the binding design principle of v2
 // ---------------------------------------------------------------------------
 
@@ -639,6 +722,17 @@ async function waitForBoot(port, tries = 60) {
 async function serverTests() {
   const port = 8899; // throwaway; never the live port
   const dir = tmpDir();
+
+  // Fail loudly if something already holds the port. A leftover instance from a
+  // manual run will happily answer these requests with STALE code, and the suite
+  // would pass against a build that no longer exists — which has now bitten
+  // twice. Better a hard stop than a green run that means nothing.
+  const held = require('child_process').execSync(`ss -tlnH 2>/dev/null | grep ":${port} " || true`).toString().trim();
+  if (held) {
+    failures.push('port precondition');
+    console.log(`FAIL port ${port} is already in use — kill the stale instance before running the suite.\n      ${held}`);
+    return;
+  }
   const child = spawn(process.execPath, [path.join(ROOT, 'server.js')], {
     env: {
       ...process.env,
@@ -751,6 +845,23 @@ async function serverTests() {
       assert.ok(page.includes('id="view-trend"'));
     });
 
+    await test('GET /api/weight is trend-only, with no target or verdict in the payload', async () => {
+      const r = await get(port, '/api/weight');
+      assert.strictEqual(r.status, 200);
+      const d = JSON.parse(r.body);
+      assert.strictEqual(d.unit, 'lb');
+      assert.ok('week' in d && 'month' in d, 'both windows');
+      assert.ok(!/target|goal|onTrack|verdict|ideal/i.test(r.body), 'no target concept may reach the page');
+    });
+
+    await test('the trend view renders in plain ink, never red-for-bad', async () => {
+      const page = (await get(port, '/')).body;
+      const sparkCss = (page.match(/\.spark[^{]*\{[^}]*\}/g) || []).join(' ');
+      assert.ok(sparkCss.length, 'the sparkline should have styles');
+      assert.ok(!/red|green|#[0-9a-f]*(00ff00|ff0000)/i.test(sparkCss), 'no valence colour on the trend line');
+      assert.ok(/var\(--ink\)/.test(sparkCss), 'the line is drawn in plain ink');
+    });
+
     await test('an unknown endpoint 404s as JSON', async () => {
       const r = await get(port, '/api/nope');
       assert.strictEqual(r.status, 404);
@@ -789,6 +900,7 @@ async function main() {
   await toolTests();
   await stretchTests();
   await movementTests();
+  await weightTests();
   await noGuiltTests();
   await checkinTests();
   await serverTests();

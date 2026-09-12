@@ -29,6 +29,7 @@ const { Store, localDate } = require('./lib/store');
 const coach = require('./lib/coach');
 const stretch = require('./lib/stretch');
 const workouts = require('./lib/workouts');
+const weight = require('./lib/weight');
 const checkin = require('./lib/checkin');
 const nutrition = require('./lib/nutrition');
 const telegram = require('./lib/telegram');
@@ -198,6 +199,19 @@ async function route(req, res, url) {
       line: workouts.summaryLine(store, cfg, days),
       suggestion: { outlet: pick.outlet, reason: pick.reason, tradeDown: pick.tradeDown },
       outlets: workouts.outlets(cfg),
+    });
+  }
+
+  // --- weight: trend, never verdict (F5) ---
+  if (method === 'GET' && p === '/api/weight') {
+    const t = weight.both(store, cfg);
+    return send(res, 200, {
+      unit: 'lb',
+      week: t.week,
+      month: t.month,
+      // Neutral sentences. No target, no valence, nothing for a view to colour
+      // green or red — see lib/weight.js for why.
+      lines: { week: weight.line(store, cfg, 7), month: weight.line(store, cfg, 30) },
     });
   }
 
