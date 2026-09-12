@@ -5,9 +5,11 @@
   "publicUrl": "https://gotkapp.com/healthcoach/",
   "dataDir": "data",
   "timezone": "Europe/London",
-  "checkin": {
-    "hourLocal": 20,
-    "enabled": true
+  "briefing": {
+    "_note": "The single daily touch. v2 change control (build package Decision 1) moved it from a 20:00 check-in to a 07:30 morning briefing; the 20:00 send is retired, not supplemented. Exactly ONE outbound message per day remains a standing rule — changing it again needs change control, not a config edit.",
+    "enabled": true,
+    "time": "07:30",
+    "timezone": "America/Denver"
   },
   "coach": {
     "model": "claude-opus-5",
