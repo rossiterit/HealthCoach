@@ -58,6 +58,44 @@
   .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ac-clay); flex: none; }
   .dot.ok { background: var(--ac-green); }
   .today { font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); }
+
+  /* Tabs. Chat is the default view; the others are reference the owner opens
+     deliberately, so they read as quiet labels rather than as competing calls. */
+  .tabs { display: flex; gap: 2px; }
+  .tab {
+    font-family: var(--sans); font-size: 10px; letter-spacing: .14em; text-transform: uppercase;
+    color: var(--muted); background: none; border: none; border-bottom: 2px solid transparent;
+    padding: 5px 10px; cursor: pointer;
+  }
+  .tab:hover { color: var(--ink); }
+  .tab[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--ac-gold); }
+  .view[hidden] { display: none; }
+
+  /* Stretch routine */
+  .routine-head { margin-bottom: 4px; }
+  .routine-head h2 { font-family: var(--serif); font-size: 22px; font-weight: 600; }
+  .routine-head h2::before { content: ""; display: inline-block; width: 22px; height: 2px; background: var(--ac-gold); vertical-align: middle; margin-right: 10px; }
+  .routine-meta { color: var(--muted); font-size: 13px; margin: 2px 0 16px 32px; }
+  .step {
+    background: var(--card); border: 1px solid var(--line); border-top: 3px solid var(--ac-slate);
+    border-radius: 12px; padding: 13px 16px; margin-bottom: 10px;
+  }
+  .step .n { font-size: 10px; letter-spacing: .14em; text-transform: uppercase; color: var(--muted); }
+  .step h3 { font-family: var(--serif); font-size: 16px; font-weight: 600; margin: 2px 0 2px; }
+  .step .dur { font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--ac-clay); margin-bottom: 6px; }
+  .step .cue { font-size: 14px; }
+  .step .why { font-size: 13px; color: var(--muted); font-style: italic; margin-top: 5px; }
+  .safety {
+    border-left: 3px solid var(--ac-clay); padding: 8px 0 8px 12px; margin: 4px 0 18px;
+    font-size: 13px; color: var(--muted);
+  }
+  .variants { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 16px; }
+  .variants button {
+    font-family: var(--sans); font-size: 10px; letter-spacing: .12em; text-transform: uppercase;
+    color: var(--muted); background: var(--paper2); border: 1px solid var(--line);
+    border-radius: 999px; padding: 4px 12px; cursor: pointer;
+  }
+  .variants button[aria-pressed="true"] { color: var(--ink); border-color: var(--ac-gold); background: var(--card); }
   .today b { font-family: var(--serif); font-size: 14px; letter-spacing: 0; text-transform: none; color: var(--ink); }
 
   /* ---- Transcript ---- */
@@ -144,12 +182,19 @@
 <div class="toolbar">
   <div class="inner">
     <div class="status"><span class="dot" id="dot"></span><span id="state">connecting</span></div>
+    <div class="tabs" role="tablist">
+      <button class="tab" id="tab-chat" role="tab" aria-selected="true" aria-controls="view-chat">Chat</button>
+      <button class="tab" id="tab-stretch" role="tab" aria-selected="false" aria-controls="view-stretch">Stretch</button>
+    </div>
     <div class="today">Today <b id="today">—</b></div>
   </div>
 </div>
 
 <main id="main">
-  <div class="wrap" id="transcript"></div>
+  <div class="view wrap" id="view-chat" role="tabpanel">
+    <div id="transcript"></div>
+  </div>
+  <div class="view wrap" id="view-stretch" role="tabpanel" hidden></div>
 </main>
 
 <footer>
@@ -336,6 +381,77 @@ async function send() {
     scroll();
     input.focus();
   }
+}
+
+// --- tabs -----------------------------------------------------------------
+// Chat is the default. The composer belongs to the chat view only — leaving it
+// visible under the routine would invite typing into a page that isn't listening.
+const TABS = [
+  { tab: 'tab-chat', view: 'view-chat' },
+  { tab: 'tab-stretch', view: 'view-stretch' },
+];
+let stretchLoaded = false;
+
+function showTab(id) {
+  TABS.forEach(({ tab, view }) => {
+    const on = tab === id;
+    $(tab).setAttribute('aria-selected', String(on));
+    $(view).hidden = !on;
+  });
+  document.querySelector('footer').hidden = id !== 'tab-chat';
+  if (id === 'tab-stretch' && !stretchLoaded) loadStretch();
+  $('main').scrollTop = 0;
+  if (id === 'tab-chat') scroll();
+}
+TABS.forEach(({ tab }) => $(tab).addEventListener('click', () => showTab(tab)));
+
+// --- stretch routine ------------------------------------------------------
+async function loadStretch(variant) {
+  const host = $('view-stretch');
+  host.textContent = '';
+  host.appendChild(el('div', 'note', 'Loading the routine…'));
+  try {
+    const url = API + '/stretch' + (variant ? '?variant=' + encodeURIComponent(variant) : '');
+    const d = await (await fetch(url)).json();
+    host.textContent = '';
+    renderRoutine(host, d, variant || null);
+    stretchLoaded = true;
+  } catch {
+    host.textContent = '';
+    host.appendChild(el('div', 'err', 'Could not load the routine. The service may be down.'));
+  }
+}
+
+function renderRoutine(host, d, active) {
+  const head = el('div', 'routine-head');
+  head.appendChild(el('h2', null, d.routine.title));
+  host.appendChild(head);
+  host.appendChild(el('div', 'routine-meta', `About ${d.routine.totalMinutes} minutes · ${d.routine.steps.length} movements — ${d.routine.intent}`));
+
+  // Safety first, above the movements, because a caveat below them is a caveat
+  // nobody reads until after they have hurt themselves.
+  host.appendChild(el('div', 'safety', d.safetyNote));
+
+  const vars = el('div', 'variants');
+  const mk = (label, key) => {
+    const b = el('button', null, label);
+    b.setAttribute('aria-pressed', String(active === key));
+    b.addEventListener('click', () => loadStretch(key));
+    vars.appendChild(b);
+  };
+  mk('Full routine', null);
+  (d.variants || []).forEach((v) => mk(v, v));
+  host.appendChild(vars);
+
+  d.routine.steps.forEach((s, i) => {
+    const card = el('div', 'step');
+    card.appendChild(el('div', 'n', `Movement ${i + 1}`));
+    card.appendChild(el('h3', null, s.name));
+    card.appendChild(el('div', 'dur', s.duration));
+    card.appendChild(el('div', 'cue', s.cue));
+    if (s.why) card.appendChild(el('div', 'why', s.why));
+    host.appendChild(card);
+  });
 }
 
 sendBtn.addEventListener('click', send);
