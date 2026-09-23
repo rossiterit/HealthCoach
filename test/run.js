@@ -826,6 +826,118 @@ async function ateToPlanTests() {
 }
 
 // ---------------------------------------------------------------------------
+// briefing + shopping list from the plan grid (v3 F4, GOTK-167)
+// ---------------------------------------------------------------------------
+
+async function planIntegrationTests() {
+  const at = (iso) => new Date(iso);
+
+  /** A store whose CURRENT week has a plan, relative to a given "now". */
+  function plannedWeek(now) {
+    const s = new Store(tmpDir()).load();
+    const week = planner.plannableWeeks(now, CFG.timezone)[0];
+    const today = localDate(now, CFG.timezone);
+    const porridge = s.addFood({ name: 'Porridge', nutrition: { calories_kcal: 300 } });
+    const curry = s.addFood({ name: 'Curry', nutrition: { calories_kcal: 700 } });
+    if (!planner.isSunday(today)) {
+      planner.assign(s, week, { date: today, slot: 'breakfast', foodId: porridge.id });
+      planner.assign(s, week, { date: today, slot: 'dinner', foodId: curry.id });
+    }
+    return { s, week, today, porridge, curry };
+  }
+
+  await test('the briefing gains a planned-meals line when a plan exists', () => {
+    const now = at('2026-09-23T13:30:00Z'); // Wednesday 07:30 Denver
+    const { s } = plannedWeek(now);
+    const f = briefing.assemble(s, CFG, now);
+    assert.ok(f.plannedLine, 'the line must be there');
+    assert.ok(/Breakfast: Porridge/.test(f.plannedLine), f.plannedLine);
+    assert.ok(/Dinner: Curry/.test(f.plannedLine), f.plannedLine);
+  });
+
+  await test('with no plan, the briefing carries no plan line and says nothing about it', () => {
+    const now = at('2026-09-23T13:30:00Z');
+    const s = new Store(tmpDir()).load();
+    const f = briefing.assemble(s, CFG, now);
+    assert.strictEqual(f.plannedLine, null, 'absent, not an empty string or a nudge');
+  });
+
+  await test("Sunday's briefing carries no plan line at all", () => {
+    // Decision 3: the free day is never referenced.
+    const now = at('2026-09-27T13:30:00Z'); // Sunday 07:30 Denver
+    const { s } = plannedWeek(now);
+    const f = briefing.assemble(s, CFG, now);
+    assert.strictEqual(f.dayOfWeek, 'Sunday');
+    assert.strictEqual(f.plannedLine, null, 'Sunday has no plan and must not be told it has none');
+  });
+
+  await test('the plan line is a reminder, never an instruction or a score', () => {
+    const now = at('2026-09-23T13:30:00Z');
+    const { s } = plannedWeek(now);
+    const f = briefing.assemble(s, CFG, now);
+    for (const bad of [/stick to/i, /make sure/i, /don't forget/i, /remember to/i, /kcal/i, /total/i, /on track/i]) {
+      assert.ok(!bad.test(f.plannedLine), `the plan line must not ${bad}`);
+    }
+  });
+
+  await test('the plan line adds a LINE, not a message — the one-touch rule holds', () => {
+    // The whole risk of F4: a plan must never become a second send.
+    const now = at('2026-09-23T13:30:00Z');
+    const { s } = plannedWeek(now);
+    const withPlan = briefing.assemble(s, CFG, now);
+    const bare = briefing.assemble(new Store(tmpDir()).load(), CFG, now);
+    assert.ok(withPlan.plannedLine && !bare.plannedLine);
+    // Same shape, same single briefing — only one field differs.
+    assert.deepStrictEqual(Object.keys(withPlan).sort(), Object.keys(bare).sort());
+  });
+
+  await test('the shopping list is told to build from the grid when one exists', () => {
+    const now = new Date();
+    const { s } = plannedWeek(now);
+    const block = dietcoach.weekPlanBlock(s, CFG);
+    if (planner.isSunday(localDate(now, CFG.timezone))) return; // nothing planned today
+    assert.ok(/SHOPPING LIST/i.test(block), block.slice(0, 140));
+    assert.ok(/build it from THIS grid/i.test(block), 'the grid must win over history');
+    assert.ok(/Do not draft from their history while a plan exists/i.test(block));
+  });
+
+  await test('with an empty grid it falls back to history-based drafting', () => {
+    const s = new Store(tmpDir()).load();
+    const block = dietcoach.weekPlanBlock(s, CFG);
+    assert.ok(/empty/i.test(block), block.slice(0, 120));
+    assert.ok(/draft it from what they actually eat/i.test(block), 'the v2 behaviour must survive');
+  });
+
+  await test('the week block is Monday to Saturday and never names Sunday as a day to plan', () => {
+    const now = new Date();
+    const { s } = plannedWeek(now);
+    const block = dietcoach.weekPlanBlock(s, CFG);
+    for (const day of ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']) {
+      assert.ok(block.includes(day), `${day} must be in the week block`);
+    }
+    // Sunday may only appear as the stated free day, never as a planned row.
+    assert.ok(!/^\s+Sunday:/m.test(block), 'Sunday must not appear as a grid row');
+  });
+
+  await test('an unplanned day in the grid is not framed as a gap to fill', () => {
+    const now = new Date();
+    const { s } = plannedWeek(now);
+    const block = dietcoach.weekPlanBlock(s, CFG);
+    if (/nothing planned/i.test(block)) {
+      assert.ok(/not a gap to fill/i.test(block), 'empty days must be stated, never mourned');
+    }
+  });
+
+  await test('the healthifier is untouched by v3', () => {
+    const s = new Store(tmpDir()).load();
+    s.setGoals({ summary: 'x' });
+    const p = dietcoach.persona(s);
+    assert.ok(/Return the whole recipe rewritten/i.test(p));
+    assert.ok(/recognisably itself/i.test(p));
+  });
+}
+
+// ---------------------------------------------------------------------------
 // the stretch routine (GOTK-159)
 // ---------------------------------------------------------------------------
 
@@ -1646,6 +1758,7 @@ async function main() {
   await foodLibraryTests();
   await plannerTests();
   await ateToPlanTests();
+  await planIntegrationTests();
   await stretchTests();
   await movementTests();
   await weightTests();
