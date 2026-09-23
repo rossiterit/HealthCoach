@@ -222,6 +222,153 @@
     .crown { padding: 18px 16px 15px; }
     .turn.coach .bubble, .turn.owner .bubble, .meal { max-width: 100%; }
   }
+
+  /* --- the Plan tab (v3 F2) ---------------------------------------------
+     Laid out to the owner's mockup: six day columns Monday–Saturday, four
+     slot rows labelled vertically down a left gutter, a daily totals row
+     under the grid, then search, then eight favourite tiles as two rows of
+     four. The wireframe decides the structure; Paper & Ink decides the
+     finish, per Decision 7. */
+
+  #view-plan { padding: 18px 20px 40px; max-width: 1400px; margin: 0 auto; }
+
+  .plan-head { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; margin-bottom: 4px; }
+  .plan-head h2 { font-family: var(--serif); font-weight: normal; font-size: 21px; margin: 0; }
+  .plan-weeks { display: flex; gap: 2px; margin-left: auto; }
+  .plan-weeks button {
+    font: inherit; font-size: 12px; padding: 5px 12px; cursor: pointer;
+    background: none; border: 1px solid var(--line); color: var(--muted);
+  }
+  .plan-weeks button:first-child { border-radius: 3px 0 0 3px; }
+  .plan-weeks button:last-child { border-radius: 0 3px 3px 0; border-left: none; }
+  .plan-weeks button[aria-pressed="true"] { background: var(--card); color: var(--ink); border-color: var(--ink); }
+  .plan-note { font-size: 11px; color: var(--muted); margin: 0 0 14px; }
+
+  /* Gutter + six equal day columns. */
+  .grid { display: grid; grid-template-columns: 26px repeat(6, minmax(0, 1fr)); gap: 6px; }
+  .grid .corner { grid-column: 1; }
+  .dayhead {
+    background: var(--card); border: 1px solid var(--line); border-radius: 3px;
+    padding: 9px 6px; text-align: center; font-size: 12px; letter-spacing: .06em;
+    text-transform: uppercase; color: var(--ink);
+  }
+  .dayhead .dnum { display: block; font-size: 10px; color: var(--muted); letter-spacing: .02em; text-transform: none; margin-top: 2px; }
+  .dayhead.is-today { border-color: var(--ac-gold); }
+
+  /* The vertical slot label from the mockup: one letter per line. */
+  .slotlabel {
+    writing-mode: vertical-rl; text-orientation: upright;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 10px; letter-spacing: .22em; color: var(--muted);
+    border: 1px solid var(--line); border-radius: 3px; background: var(--paper2);
+  }
+
+  .cell {
+    min-height: 92px; border: 1px solid var(--line); border-radius: 3px;
+    background: var(--card); padding: 5px; display: flex; flex-direction: column; gap: 4px;
+  }
+  .cell.drop { border-color: var(--ac-green); background: #eef2ea; }
+  .cell.armed { border-style: dashed; border-color: var(--ac-gold); cursor: copy; }
+
+  .card {
+    border: 1px solid var(--line); border-radius: 2px; background: var(--paper);
+    padding: 5px 6px; font-size: 12px; line-height: 1.3; cursor: grab;
+    display: flex; gap: 6px; align-items: flex-start;
+  }
+  .card:active { cursor: grabbing; }
+  .card .cname { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+  .card .cx {
+    border: none; background: none; font: inherit; font-size: 13px; line-height: 1;
+    color: var(--muted); cursor: pointer; padding: 0 2px;
+  }
+  .card .cx:hover { color: var(--ac-clay); }
+  .card.sel { border-color: var(--ac-gold); background: #f7efe0; }
+
+  /* Totals row, under the grid, one cell per day — mockup order:
+     Calories | Protein | Fat | Carbs | Sodium. Plain ink: nothing here
+     turns a colour, because nothing here is a verdict (Decision 4). */
+  .totals {
+    border: 1px solid var(--line); border-radius: 3px; background: var(--paper2);
+    padding: 5px 4px; font-size: 10px; color: var(--ink); text-align: center;
+    display: flex; flex-wrap: wrap; justify-content: center; gap: 2px 5px;
+  }
+  .totals .tv { white-space: nowrap; }
+  .totals .tv b { font-weight: 600; }
+  .totals.none { color: var(--muted); }
+
+  .plan-tools { margin-top: 22px; display: grid; gap: 10px; }
+  .searchrow { display: flex; gap: 8px; flex-wrap: wrap; }
+  .searchrow input {
+    flex: 1 1 260px; font: inherit; font-size: 14px; padding: 9px 11px;
+    border: 1px solid var(--line); border-radius: 3px; background: var(--card); color: var(--ink);
+  }
+  .searchrow button {
+    font: inherit; font-size: 13px; padding: 9px 20px; border-radius: 20px;
+    border: 1px solid var(--line); background: var(--card); color: var(--ink); cursor: pointer;
+  }
+  .searchrow button:hover { background: var(--paper2); }
+  .searchrow button:disabled { opacity: .5; cursor: default; }
+
+  .results { display: grid; gap: 4px; }
+  .result {
+    border: 1px solid var(--line); border-radius: 3px; background: var(--card);
+    padding: 7px 10px; font-size: 12px; cursor: grab;
+    display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap;
+  }
+  .result.sel { border-color: var(--ac-gold); background: #f7efe0; }
+  .result .rname { font-weight: 600; font-size: 13px; }
+  .result .rmacros { color: var(--muted); }
+  .result .rpin {
+    margin-left: auto; font: inherit; font-size: 11px; background: none;
+    border: 1px solid var(--line); border-radius: 12px; padding: 2px 9px;
+    color: var(--muted); cursor: pointer;
+  }
+  .result .rpin:hover { color: var(--ink); border-color: var(--ink); }
+
+  .favs-label { font-size: 11px; color: var(--muted); letter-spacing: .04em; margin-top: 6px; }
+  /* Two rows of four, exactly as the mockup draws them. */
+  .favs { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+  .fav {
+    min-height: 46px; border: 1px solid var(--line); border-radius: 3px; background: var(--card);
+    padding: 7px 9px; font-size: 12px; cursor: grab; display: flex; align-items: center;
+    justify-content: space-between; gap: 6px; overflow-wrap: anywhere;
+  }
+  .fav.empty { color: var(--muted); font-style: italic; background: var(--paper2); cursor: default; }
+  .fav.drop { border-color: var(--ac-green); background: #eef2ea; }
+  .fav.sel { border-color: var(--ac-gold); background: #f7efe0; }
+  .fav .fx { border: none; background: none; font: inherit; color: var(--muted); cursor: pointer; padding: 0 2px; }
+  .fav .fx:hover { color: var(--ac-clay); }
+
+  .plan-msg { font-size: 12px; color: var(--muted); min-height: 17px; }
+  .plan-msg.warn { color: var(--warn-text); }
+
+  /* The armed-card banner for touch: tap a meal, then tap where it goes. */
+  .arm-bar {
+    position: sticky; top: 0; z-index: 5; background: var(--ink); color: var(--paper);
+    border-radius: 3px; padding: 8px 12px; font-size: 12px; margin-bottom: 10px;
+    display: flex; gap: 10px; align-items: center;
+  }
+  .arm-bar button {
+    margin-left: auto; font: inherit; font-size: 11px; background: none; color: var(--paper);
+    border: 1px solid rgba(244,236,224,.5); border-radius: 12px; padding: 2px 10px; cursor: pointer;
+  }
+
+  /* Phone: a six-column grid is unusable at 400px, so the same content
+     stacks one day at a time. Tap-to-assign is the interaction here — it is
+     offered at every width, not bolted on for touch. */
+  @media (max-width: 760px) {
+    #view-plan { padding: 16px; }
+    .grid { display: block; }
+    .grid .corner, .grid .slotlabel { display: none; }
+    .dayblock { border: 1px solid var(--line); border-radius: 3px; margin-bottom: 12px; overflow: hidden; }
+    .dayblock .dayhead { border: none; border-bottom: 1px solid var(--line); border-radius: 0; }
+    .dayblock .cell { border: none; border-bottom: 1px dashed var(--line); border-radius: 0; min-height: 0; }
+    .dayblock .cell .slotname {
+      font-size: 10px; letter-spacing: .14em; text-transform: uppercase; color: var(--muted);
+    }
+    .dayblock .totals { border: none; border-radius: 0; }
+    .favs { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  }
 </style>
 </head>
 <body>
@@ -239,6 +386,7 @@
       <button class="tab" id="tab-chat" role="tab" aria-selected="true" aria-controls="view-chat">Chat</button>
       <button class="tab" id="tab-stretch" role="tab" aria-selected="false" aria-controls="view-stretch">Stretch</button>
       <button class="tab" id="tab-trend" role="tab" aria-selected="false" aria-controls="view-trend">Trend</button>
+      <button class="tab" id="tab-plan" role="tab" aria-selected="false" aria-controls="view-plan">Plan</button>
     </div>
     <div class="today">Today <b id="today">—</b></div>
   </div>
@@ -251,6 +399,7 @@
   </div>
   <div class="view wrap" id="view-stretch" role="tabpanel" hidden></div>
   <div class="view wrap" id="view-trend" role="tabpanel" hidden></div>
+  <div class="view" id="view-plan" role="tabpanel" hidden></div>
 </main>
 
 <footer>
@@ -469,6 +618,7 @@ const TABS = [
   { tab: 'tab-chat', view: 'view-chat' },
   { tab: 'tab-stretch', view: 'view-stretch' },
   { tab: 'tab-trend', view: 'view-trend' },
+  { tab: 'tab-plan', view: 'view-plan' },
 ];
 let stretchLoaded = false;
 
@@ -481,6 +631,7 @@ function showTab(id) {
   document.querySelector('footer').hidden = id !== 'tab-chat';
   if (id === 'tab-stretch' && !stretchLoaded) loadStretch();
   if (id === 'tab-trend') loadTrend();
+  if (id === 'tab-plan') loadPlan();
   $('main').scrollTop = 0;
   if (id === 'tab-chat') scroll();
 }
@@ -660,6 +811,406 @@ function renderMovement(host, d) {
     host.appendChild(s);
   }
 }
+
+// --- the Plan tab (v3 F2) -------------------------------------------------
+//
+// Two ways to move a meal, both live at every width:
+//   drag-and-drop, for a pointer; and
+//   tap-to-assign — tap a meal to arm it, tap where it goes.
+// Tap is not a touch fallback bolted onto a mouse design. It is the only thing
+// that works on a phone, and it works identically on a desktop, which also
+// makes it the thing that is actually keyboard- and test-reachable.
+//
+// THE GRID PLANS. Nothing on this tab logs anything: there is no call here to
+// /api/chat or /api/meals, and the only writes go to /api/plan/* and
+// /api/favorites. That is Decision 1, kept true by what this code cannot do.
+
+const plan = {
+  week: null,      // the weekStart being shown
+  weeks: [],       // [current, next]
+  data: null,      // the /api/plan payload
+  results: [],     // current search results
+  armed: null,     // { kind: 'food'|'entry', foodId, entryId, name }
+};
+
+function planMsg(text, warn) {
+  const m = $('plan-msg');
+  if (!m) return;
+  m.textContent = text || '';
+  m.className = 'plan-msg' + (warn ? ' warn' : '');
+}
+
+async function planApi(path, body) {
+  const res = await fetch(API + path, {
+    method: body ? 'POST' : 'GET',
+    headers: body ? { 'Content-Type': 'application/json' } : undefined,
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || 'That did not save.');
+  return data;
+}
+
+/** Arm a meal for tap-to-assign, or disarm if it was already armed. */
+function arm(what) {
+  const same = plan.armed && plan.armed.entryId === what.entryId && plan.armed.foodId === what.foodId;
+  plan.armed = same ? null : what;
+  renderPlan();
+}
+
+function applyPlanPayload(d) {
+  if (d.plan) plan.data = d.plan;
+  if (d.favorites) plan.data.favorites = d.favorites;
+  renderPlan();
+}
+
+async function loadPlan(week) {
+  const host = $('view-plan');
+  if (!plan.data) { host.textContent = ''; host.appendChild(el('div', 'note', 'Loading the week…')); }
+  try {
+    const d = await planApi('/plan' + (week ? '?week=' + encodeURIComponent(week) : ''));
+    plan.week = d.weekStart;
+    plan.weeks = d.weeks || [];
+    plan.data = d;
+    renderPlan();
+  } catch (e) {
+    host.textContent = '';
+    host.appendChild(el('div', 'note', 'Could not load the plan: ' + e.message));
+  }
+}
+
+/** "Mon 21 Sep – Sat 26 Sep", for the heading. */
+function weekLabel(d) {
+  const days = d.days || [];
+  if (!days.length) return '';
+  const a = days[0], b = days[days.length - 1];
+  return `${a.short} ${a.dayNum} ${a.month} – ${b.short} ${b.dayNum} ${b.month}`;
+}
+
+function totalsNode(t) {
+  const n = el('div', 'totals' + (t.count ? '' : ' none'));
+  if (!t.count) { n.textContent = 'nothing planned'; return n; }
+  // Mockup order, fixed: Calories | Protein | Fat | Carbs | Sodium.
+  t.fields.forEach((f, i) => {
+    const v = el('span', 'tv');
+    if (f.value === null || f.value === undefined) {
+      v.textContent = `${f.label} —`;
+    } else {
+      const b = el('b', null, String(f.value) + f.unit);
+      v.appendChild(b);
+      v.appendChild(document.createTextNode(' ' + f.label));
+    }
+    n.appendChild(v);
+    if (i < t.fields.length - 1) n.appendChild(el('span', 'tv', '|'));
+  });
+  return n;
+}
+
+function cardNode(card, day, slot) {
+  const c = el('div', 'card' + (plan.armed && plan.armed.entryId === card.entryId ? ' sel' : ''));
+  c.draggable = true;
+  c.appendChild(el('span', 'cname', card.name));
+
+  const x = el('button', 'cx', '×');
+  x.title = 'Take this off the plan';
+  x.setAttribute('aria-label', `Remove ${card.name} from ${day.weekday} ${slot.label}`);
+  x.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    try {
+      // Removing a card is removing an intention. The food stays in the
+      // library — the API says deleted:false and the wording matches.
+      applyPlanPayload(await planApi('/plan/remove', { week: plan.week, entryId: card.entryId }));
+      planMsg(`Took ${card.name} off ${day.weekday}. It is still in your library.`);
+    } catch (err) { planMsg(err.message, true); }
+  });
+  c.appendChild(x);
+
+  c.addEventListener('dragstart', (e) => {
+    e.dataTransfer.setData('text/plain', JSON.stringify({ kind: 'entry', entryId: card.entryId, foodId: card.foodId, name: card.name }));
+    e.dataTransfer.effectAllowed = 'move';
+  });
+  c.addEventListener('click', () => arm({ kind: 'entry', entryId: card.entryId, foodId: card.foodId, name: card.name }));
+  return c;
+}
+
+/** Drop a payload into a day slot: a move if it came from the grid, else new. */
+async function dropIntoSlot(payload, date, slot) {
+  try {
+    if (payload.kind === 'entry') {
+      applyPlanPayload(await planApi('/plan/move', { week: plan.week, entryId: payload.entryId, date, slot }));
+      planMsg(`Moved ${payload.name}.`);
+    } else {
+      applyPlanPayload(await planApi('/plan/assign', { week: plan.week, date, slot, foodId: payload.foodId }));
+      planMsg(`Added ${payload.name}.`);
+    }
+    plan.armed = null;
+    renderPlan();
+  } catch (e) { planMsg(e.message, true); }
+}
+
+function cellNode(day, slot, stacked) {
+  const cell = el('div', 'cell' + (plan.armed ? ' armed' : ''));
+  if (stacked) cell.appendChild(el('div', 'slotname', slot.label));
+  slot.cards.forEach((card) => cell.appendChild(cardNode(card, day, slot)));
+
+  cell.addEventListener('dragover', (e) => { e.preventDefault(); cell.classList.add('drop'); });
+  cell.addEventListener('dragleave', () => cell.classList.remove('drop'));
+  cell.addEventListener('drop', (e) => {
+    e.preventDefault();
+    cell.classList.remove('drop');
+    let payload; try { payload = JSON.parse(e.dataTransfer.getData('text/plain')); } catch { return; }
+    dropIntoSlot(payload, day.date, slot.slot);
+  });
+  // Tap-to-assign: the armed meal lands here.
+  cell.addEventListener('click', (e) => {
+    if (!plan.armed || e.target.closest('.card')) return;
+    dropIntoSlot(plan.armed, day.date, slot.slot);
+  });
+  return cell;
+}
+
+function renderPlan() {
+  const host = $('view-plan');
+  const d = plan.data;
+  host.textContent = '';
+  if (!d) return;
+
+  const head = el('div', 'plan-head');
+  const h = el('h2', null, 'Plan');
+  head.appendChild(h);
+  head.appendChild(el('span', 'plan-note', weekLabel(d)));
+
+  const weeks = el('div', 'plan-weeks');
+  ['This week', 'Next week'].forEach((label, i) => {
+    const b = el('button', null, label);
+    b.setAttribute('aria-pressed', String(plan.weeks[i] === plan.week));
+    b.addEventListener('click', () => loadPlan(plan.weeks[i]));
+    weeks.appendChild(b);
+  });
+  head.appendChild(weeks);
+  host.appendChild(head);
+
+  // Sunday is not a column that got hidden — it was never in the data.
+  host.appendChild(el('p', 'plan-note', 'Monday to Saturday. Sunday is yours. Totals are estimates.'));
+
+  if (plan.armed) {
+    const bar = el('div', 'arm-bar');
+    bar.appendChild(el('span', null, `${plan.armed.name} — now tap a meal slot, or a favourite tile.`));
+    const cancel = el('button', null, 'Cancel');
+    cancel.addEventListener('click', () => { plan.armed = null; renderPlan(); });
+    bar.appendChild(cancel);
+    host.appendChild(bar);
+  }
+
+  const stacked = window.matchMedia('(max-width: 760px)').matches;
+  const grid = el('div', 'grid');
+
+  if (stacked) {
+    // Phone: one day at a time, same content, same interactions.
+    d.days.forEach((day) => {
+      const block = el('div', 'dayblock');
+      const hd = el('div', 'dayhead' + (day.date === d.today ? ' is-today' : ''));
+      hd.appendChild(document.createTextNode(day.weekday));
+      hd.appendChild(el('span', 'dnum', `${day.dayNum} ${day.month}`));
+      block.appendChild(hd);
+      day.slots.forEach((slot) => block.appendChild(cellNode(day, slot, true)));
+      block.appendChild(totalsNode(day.totals));
+      grid.appendChild(block);
+    });
+  } else {
+    grid.appendChild(el('div', 'corner'));
+    d.days.forEach((day) => {
+      const hd = el('div', 'dayhead' + (day.date === d.today ? ' is-today' : ''));
+      hd.appendChild(document.createTextNode(day.weekday));
+      hd.appendChild(el('span', 'dnum', `${day.dayNum} ${day.month}`));
+      grid.appendChild(hd);
+    });
+    d.slots.forEach((s, row) => {
+      // The vertical gutter label from the mockup.
+      grid.appendChild(el('div', 'slotlabel', s.label.toUpperCase()));
+      d.days.forEach((day) => grid.appendChild(cellNode(day, day.slots[row], false)));
+    });
+    grid.appendChild(el('div', 'corner'));
+    d.days.forEach((day) => grid.appendChild(totalsNode(day.totals)));
+  }
+  host.appendChild(grid);
+
+  // --- search + favourites ---
+  const tools = el('div', 'plan-tools');
+
+  const row = el('div', 'searchrow');
+  const field = el('input');
+  field.id = 'plan-q';
+  field.placeholder = 'Search your food library…';
+  field.setAttribute('aria-label', 'Search your food library');
+  field.value = plan.lastQuery || '';
+  const btn = el('button', null, 'Search');
+  btn.addEventListener('click', () => runSearch(field.value));
+  field.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); runSearch(field.value); } });
+  row.appendChild(field);
+  row.appendChild(btn);
+  tools.appendChild(row);
+
+  const msg = el('div', 'plan-msg', '');
+  msg.id = 'plan-msg';
+  tools.appendChild(msg);
+
+  const results = el('div', 'results');
+  plan.results.forEach((r) => results.appendChild(resultNode(r)));
+  if (plan.searchMiss) results.appendChild(missNode());
+  tools.appendChild(results);
+
+  tools.appendChild(el('div', 'favs-label', 'FAVOURITES'));
+  const favs = el('div', 'favs');
+  (d.favorites || []).forEach((f, i) => favs.appendChild(favNode(f, i)));
+  tools.appendChild(favs);
+
+  host.appendChild(tools);
+  if (plan.pendingMsg) { planMsg(plan.pendingMsg.text, plan.pendingMsg.warn); plan.pendingMsg = null; }
+}
+
+function macroLine(n) {
+  const bits = [];
+  const add = (v, suffix, label) => { if (v !== null && v !== undefined) bits.push(`${v}${suffix} ${label}`); };
+  if (n.calories_kcal !== null && n.calories_kcal !== undefined) bits.push(`${n.calories_kcal} Calories`);
+  add(n.protein_g, 'g', 'Protein'); add(n.fat_g, 'g', 'Fat');
+  add(n.carb_g, 'g', 'Carbs'); add(n.sodium_mg, 'mg', 'Sodium');
+  return bits.join(' | ');
+}
+
+function resultNode(r) {
+  const n = el('div', 'result' + (plan.armed && plan.armed.foodId === r.id && plan.armed.kind === 'food' ? ' sel' : ''));
+  n.draggable = true;
+  n.appendChild(el('span', 'rname', r.name));
+  n.appendChild(el('span', 'rmacros', macroLine(r.nutrition || {})));
+
+  const pin = el('button', 'rpin', r.favoriteSlot === null ? 'Pin' : 'Pinned');
+  pin.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    try {
+      const out = await planApi('/favorites', { foodId: r.id });
+      plan.data.favorites = out.favorites;
+      plan.pendingMsg = { text: out.replaced ? `Pinned ${r.name}; that replaced ${out.replaced.name}, which is still in your library.` : `Pinned ${r.name}.` };
+      await runSearch(plan.lastQuery, true);
+    } catch (err) { planMsg(err.message, true); }
+  });
+  n.appendChild(pin);
+
+  n.addEventListener('dragstart', (e) => {
+    e.dataTransfer.setData('text/plain', JSON.stringify({ kind: 'food', foodId: r.id, name: r.name }));
+    e.dataTransfer.effectAllowed = 'copy';
+  });
+  n.addEventListener('click', () => arm({ kind: 'food', foodId: r.id, name: r.name }));
+  return n;
+}
+
+/** The create-on-miss offer. Typing never writes; this button does. */
+function missNode() {
+  const n = el('div', 'result');
+  n.appendChild(el('span', 'rmacros', `"${plan.lastQuery}" is not in your library yet.`));
+  const b = el('button', 'rpin', 'Add it');
+  b.addEventListener('click', async () => {
+    b.disabled = true;
+    b.textContent = 'Estimating…';
+    try {
+      const out = await planApi('/foods', { name: plan.lastQuery });
+      plan.pendingMsg = { text: `Added ${out.food.name} — ${macroLine(out.food.nutrition)}. That is my estimate; correct it in chat if it is off.` };
+      await runSearch(plan.lastQuery, true);
+    } catch (e) { planMsg(e.message, true); b.disabled = false; b.textContent = 'Add it'; }
+  });
+  n.appendChild(b);
+  return n;
+}
+
+function favNode(f, slot) {
+  const n = el('div', 'fav' + (f ? '' : ' empty') + (plan.armed && f && plan.armed.foodId === f.id ? ' sel' : ''));
+  n.appendChild(el('span', null, f ? f.name : 'empty'));
+
+  if (f) {
+    n.draggable = true;
+    const x = el('button', 'fx', '×');
+    x.title = 'Unpin — the meal stays in your library';
+    x.setAttribute('aria-label', `Unpin ${f.name}`);
+    x.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      try {
+        const out = await planApi('/favorites', { action: 'unpin', slot });
+        plan.data.favorites = out.favorites;
+        renderPlan();
+        planMsg(`Unpinned ${f.name}. It is still in your library.`);
+      } catch (err) { planMsg(err.message, true); }
+    });
+    n.appendChild(x);
+    n.addEventListener('dragstart', (e) => {
+      e.dataTransfer.setData('text/plain', JSON.stringify({ kind: 'food', foodId: f.id, name: f.name }));
+      e.dataTransfer.effectAllowed = 'copy';
+    });
+  }
+
+  // Favourites take drops from both directions (Decision 5). A drop from a day
+  // slot COPIES: the day keeps its meal.
+  n.addEventListener('dragover', (e) => { e.preventDefault(); n.classList.add('drop'); });
+  n.addEventListener('dragleave', () => n.classList.remove('drop'));
+  n.addEventListener('drop', (e) => {
+    e.preventDefault();
+    n.classList.remove('drop');
+    let payload; try { payload = JSON.parse(e.dataTransfer.getData('text/plain')); } catch { return; }
+    pinInto(payload, slot);
+  });
+
+  // ONE click handler, which decides. Two handlers here — one to arm the tile,
+  // one to receive an armed meal — both fire on a single tap, so arming a
+  // favourite immediately pinned it back onto itself and nothing looked armed.
+  n.addEventListener('click', (e) => {
+    if (e.target.closest('.fx')) return;
+    // Something armed elsewhere lands here. Tapping the armed tile itself
+    // disarms rather than pinning it onto its own slot.
+    if (plan.armed && !(f && plan.armed.foodId === f.id && plan.armed.kind === 'food')) return pinInto(plan.armed, slot);
+    if (f) arm({ kind: 'food', foodId: f.id, name: f.name });
+  });
+  return n;
+}
+
+async function pinInto(payload, slot) {
+  try {
+    let out, kept = false;
+    if (payload.kind === 'entry') {
+      // Slot -> tile is a COPY. planner.pinFromSlot leaves the grid alone.
+      out = await planApi('/plan/pin', { week: plan.week, entryId: payload.entryId, slot });
+      kept = true;
+      applyPlanPayload(out);
+    } else {
+      out = await planApi('/favorites', { foodId: payload.foodId, slot });
+      plan.data.favorites = out.favorites;
+      renderPlan();
+    }
+    plan.armed = null;
+    const replaced = out.replaced ? ` That replaced ${out.replaced.name || 'the old favourite'}, which is still in your library.` : '';
+    planMsg(`Pinned ${payload.name}.` + (kept ? ' It is still on the day too.' : '') + replaced);
+    renderPlan();
+  } catch (e) { planMsg(e.message, true); }
+}
+
+async function runSearch(q, quiet) {
+  plan.lastQuery = q;
+  if (!q || !q.trim()) { plan.results = []; plan.searchMiss = false; renderPlan(); return; }
+  try {
+    const d = await planApi('/foods?q=' + encodeURIComponent(q.trim()));
+    plan.results = d.results || [];
+    plan.searchMiss = Boolean(d.miss);
+    renderPlan();
+    if (!quiet && !plan.results.length) planMsg('Nothing in your library matches that yet.');
+  } catch (e) { planMsg(e.message, true); }
+}
+
+// The stacked/grid decision is made at render time, so a rotation or a resize
+// has to re-render or the phone layout would persist on a widened window.
+let planResizeTimer = null;
+window.addEventListener('resize', () => {
+  if (!plan.data || $('view-plan').hidden) return;
+  clearTimeout(planResizeTimer);
+  planResizeTimer = setTimeout(renderPlan, 150);
+});
 
 sendBtn.addEventListener('click', send);
 input.addEventListener('keydown', (e) => {

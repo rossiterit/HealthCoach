@@ -28,6 +28,7 @@ const nutrition = require(path.join(ROOT, 'lib/nutrition'));
 const secrets = require(path.join(ROOT, 'lib/secrets'));
 const dietcoach = require(path.join(ROOT, 'lib/dietcoach'));
 const foods = require(path.join(ROOT, 'lib/foods'));
+const planner = require(path.join(ROOT, 'lib/planner'));
 const coach = require(path.join(ROOT, 'lib/coach'));
 const stretch = require(path.join(ROOT, 'lib/stretch'));
 const workouts = require(path.join(ROOT, 'lib/workouts'));
@@ -502,6 +503,173 @@ async function foodLibraryTests() {
     for (const bad of [/\bunhealthy\b/i, /\bbad choice\b/i, /\btreat\b/i, /\bshould avoid\b/i]) {
       assert.ok(!bad.test(block), `library context must not moralise: ${bad}`);
     }
+  });
+}
+
+// ---------------------------------------------------------------------------
+// the week grid (v3 F2, GOTK-165)
+// ---------------------------------------------------------------------------
+
+async function plannerTests() {
+  const TZ = 'America/Denver';
+  const WED = new Date('2026-09-23T15:00:00Z'); // a Wednesday
+  const WEEK = '2026-09-21';                    // the Monday of that week
+
+  /** A store with a stocked library, ready to plan into. */
+  function planned() {
+    const s = new Store(tmpDir()).load();
+    const porridge = s.addFood({ name: 'Porridge', nutrition: { calories_kcal: 300, protein_g: 12, fat_g: 6, carb_g: 50, sodium_mg: 100 } });
+    const curry = s.addFood({ name: 'Curry', nutrition: { calories_kcal: 700, protein_g: 35, fat_g: 25, carb_g: 80, sodium_mg: 1200 } });
+    return { s, porridge, curry };
+  }
+
+  await test('the week is Monday to Saturday — six days, and no Sunday anywhere', () => {
+    const dates = planner.weekDates(WEEK);
+    assert.strictEqual(dates.length, 6);
+    assert.strictEqual(dates[0], '2026-09-21');
+    assert.strictEqual(dates[5], '2026-09-26');
+    assert.ok(!dates.some(planner.isSunday), 'no date in a planner week may be a Sunday');
+    assert.deepStrictEqual(planner.weekDays(WEEK).map((d) => d.weekday), [
+      'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday',
+    ]);
+  });
+
+  await test('the rendered week has six day columns and no Sunday key to hide', () => {
+    const { s } = planned();
+    const v = planner.view(s, CFG, WEEK);
+    assert.strictEqual(v.days.length, 6);
+    assert.ok(!JSON.stringify(v).includes('Sunday'), 'Sunday must not appear in the payload at all');
+    assert.deepStrictEqual(v.slots.map((x) => x.label), ['Breakfast', 'Lunch', 'Dinner', 'Snacks']);
+  });
+
+  await test('week arithmetic survives a DST change', () => {
+    // US DST ends 2026-11-01. A midnight-anchored date would slip a day here.
+    assert.deepStrictEqual(planner.weekDates('2026-10-26'), [
+      '2026-10-26', '2026-10-27', '2026-10-28', '2026-10-29', '2026-10-30', '2026-10-31',
+    ]);
+    assert.strictEqual(planner.addDays('2026-11-01', 1), '2026-11-02');
+  });
+
+  await test('the current week is the default, and next week is plannable', () => {
+    assert.deepStrictEqual(planner.plannableWeeks(WED, TZ), ['2026-09-21', '2026-09-28']);
+  });
+
+  await test('on Sunday the planner rolls forward rather than opening six past days', () => {
+    // Flagged judgement call: ISO puts Sunday in the week just ended, which
+    // would open the planner on six days that are all behind the owner.
+    const sunday = new Date('2026-09-27T18:00:00Z');
+    assert.strictEqual(planner.isoDayOfWeek(sunday, TZ), 7);
+    assert.deepStrictEqual(planner.plannableWeeks(sunday, TZ), ['2026-09-28', '2026-10-05']);
+  });
+
+  await test('assigning puts a card in a slot and nothing in the food log', () => {
+    const { s, porridge } = planned();
+    const out = planner.assign(s, WEEK, { date: '2026-09-23', slot: 'breakfast', foodId: porridge.id });
+    assert.ok(out.entry, out.error);
+    const wed = planner.view(s, CFG, WEEK).days.find((d) => d.date === '2026-09-23');
+    assert.deepStrictEqual(wed.slots.find((x) => x.slot === 'breakfast').cards.map((c) => c.name), ['Porridge']);
+    // Decision 1, the binding one.
+    assert.strictEqual(s.data.meals.length, 0, 'the planner must never write to the food log');
+  });
+
+  await test('a slot holds more than one card — Snacks would be useless otherwise', () => {
+    const { s, porridge, curry } = planned();
+    planner.assign(s, WEEK, { date: '2026-09-23', slot: 'snacks', foodId: porridge.id });
+    planner.assign(s, WEEK, { date: '2026-09-23', slot: 'snacks', foodId: curry.id });
+    const wed = planner.view(s, CFG, WEEK).days.find((d) => d.date === '2026-09-23');
+    assert.strictEqual(wed.slots.find((x) => x.slot === 'snacks').cards.length, 2);
+  });
+
+  await test('Sunday is refused by every mutation, not merely hidden', () => {
+    const { s, porridge } = planned();
+    const out = planner.assign(s, WEEK, { date: '2026-09-27', slot: 'dinner', foodId: porridge.id });
+    assert.ok(out.error, 'a Sunday assign must fail');
+    assert.ok(/free day/i.test(out.error), out.error);
+  });
+
+  await test('a date outside the week is refused', () => {
+    const { s, porridge } = planned();
+    assert.ok(planner.assign(s, WEEK, { date: '2026-10-05', slot: 'lunch', foodId: porridge.id }).error);
+  });
+
+  await test('moving a card is a move — it leaves where it was', () => {
+    const { s, porridge } = planned();
+    const a = planner.assign(s, WEEK, { date: '2026-09-21', slot: 'breakfast', foodId: porridge.id });
+    planner.move(s, WEEK, a.entry.entryId, { date: '2026-09-24', slot: 'dinner' });
+    const v = planner.view(s, CFG, WEEK);
+    const mon = v.days.find((d) => d.date === '2026-09-21');
+    const thu = v.days.find((d) => d.date === '2026-09-24');
+    assert.strictEqual(mon.slots.find((x) => x.slot === 'breakfast').cards.length, 0);
+    assert.strictEqual(thu.slots.find((x) => x.slot === 'dinner').cards.length, 1);
+  });
+
+  await test('slot to favourite is a COPY — the day keeps its meal (Decision 5)', () => {
+    const { s, porridge } = planned();
+    const a = planner.assign(s, WEEK, { date: '2026-09-22', slot: 'lunch', foodId: porridge.id });
+    const out = planner.pinFromSlot(s, WEEK, a.entry.entryId, 0);
+    assert.strictEqual(out.slot, 0);
+    assert.strictEqual(s.favorites()[0], porridge.id);
+    const tue = planner.view(s, CFG, WEEK).days.find((d) => d.date === '2026-09-22');
+    assert.strictEqual(tue.slots.find((x) => x.slot === 'lunch').cards.length, 1, 'the day must keep its meal');
+    assert.ok(out.keptInDay, 'and the payload must say so');
+  });
+
+  await test('taking a card off a day leaves the food in the library', () => {
+    const { s, porridge } = planned();
+    const a = planner.assign(s, WEEK, { date: '2026-09-25', slot: 'dinner', foodId: porridge.id });
+    const out = planner.remove(s, WEEK, a.entry.entryId);
+    assert.strictEqual(out.deletedFromLibrary, false);
+    assert.ok(s.getFood(porridge.id), 'the library row survives');
+  });
+
+  await test('totals are the five figures, in the mockup order, flagged as estimates', () => {
+    const { s, porridge, curry } = planned();
+    planner.assign(s, WEEK, { date: '2026-09-23', slot: 'breakfast', foodId: porridge.id });
+    planner.assign(s, WEEK, { date: '2026-09-23', slot: 'dinner', foodId: curry.id });
+    const wed = planner.view(s, CFG, WEEK).days.find((d) => d.date === '2026-09-23');
+    assert.deepStrictEqual(wed.totals.fields.map((f) => f.label), ['Calories', 'Protein', 'Fat', 'Carbs', 'Sodium']);
+    assert.deepStrictEqual(wed.totals.fields.map((f) => f.value), [1000, 47, 31, 130, 1300]);
+    assert.strictEqual(wed.totals.estimate, true);
+  });
+
+  await test('correcting a library item reflows every plan that uses it', () => {
+    const { s, porridge } = planned();
+    planner.assign(s, WEEK, { date: '2026-09-23', slot: 'breakfast', foodId: porridge.id });
+    s.updateFood(porridge.id, { nutrition: { calories_kcal: 450 } });
+    const wed = planner.view(s, CFG, WEEK).days.find((d) => d.date === '2026-09-23');
+    assert.strictEqual(wed.totals.fields[0].value, 450);
+  });
+
+  await test('the totals carry no target, no budget, no remaining and no verdict', () => {
+    // The no-guilt rule as a shape rather than a promise: a view cannot render
+    // a judgement the payload does not contain.
+    const { s, porridge } = planned();
+    planner.assign(s, WEEK, { date: '2026-09-23', slot: 'breakfast', foodId: porridge.id });
+    const v = planner.view(s, CFG, WEEK);
+    const json = JSON.stringify(v);
+    for (const banned of ['target', 'budget', 'remaining', 'goal', 'limit', 'deficit', 'surplus', 'verdict']) {
+      assert.ok(!new RegExp(`"${banned}`, 'i').test(json), `the plan payload must carry no "${banned}" field`);
+    }
+    assert.deepStrictEqual(Object.keys(v.days[0].totals).sort(), ['count', 'estimate', 'fields']);
+  });
+
+  await test('the planner exports nothing that could write a meal', () => {
+    // Decision 1 by layout: there is no function in this module that logs.
+    for (const name of Object.keys(planner)) {
+      if (typeof planner[name] !== 'function') continue;
+      assert.ok(!/^(log|eat|ate|confirm)/i.test(name), `planner.${name} looks like a logging path`);
+    }
+  });
+
+  await test('the planned line reads as a list, never as a score, and never on Sunday', () => {
+    const { s, porridge, curry } = planned();
+    planner.assign(s, WEEK, { date: '2026-09-23', slot: 'breakfast', foodId: porridge.id });
+    planner.assign(s, WEEK, { date: '2026-09-23', slot: 'dinner', foodId: curry.id });
+    const line = planner.plannedLine(s, CFG, '2026-09-23');
+    assert.ok(/Breakfast: Porridge/.test(line), line);
+    assert.ok(/Dinner: Curry/.test(line), line);
+    assert.ok(!/kcal|calorie|total/i.test(line), 'the briefing line names meals, it does not score the day');
+    assert.strictEqual(planner.plannedLine(s, CFG, '2026-09-27'), null, 'never on Sunday');
   });
 }
 
@@ -1205,6 +1373,60 @@ async function serverTests() {
       assert.ok(page.includes('id="view-trend"'));
     });
 
+    await test('the page carries the Plan tab, fourth, per the spec tab order', async () => {
+      const page = (await get(port, '/')).body;
+      assert.ok(page.includes('id="tab-plan"'));
+      assert.ok(page.includes('id="view-plan"'));
+      const order = ['tab-chat', 'tab-stretch', 'tab-trend', 'tab-plan'].map((id) => page.indexOf(id));
+      assert.deepStrictEqual(order, [...order].sort((a, b) => a - b), 'Chat / Stretch / Trend / Plan');
+    });
+
+    await test('GET /api/plan serves six days, Monday to Saturday, with no Sunday', async () => {
+      const r = await get(port, '/api/plan');
+      assert.strictEqual(r.status, 200);
+      const d = JSON.parse(r.body);
+      assert.strictEqual(d.days.length, 6);
+      assert.deepStrictEqual(d.days.map((x) => x.weekday), [
+        'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday',
+      ]);
+      assert.ok(!/Sunday/.test(r.body), 'Sunday must not reach the page in any form');
+      assert.strictEqual(d.weeks.length, 2, 'this week and next');
+      assert.strictEqual(d.favorites.length, 8, 'eight tiles, per the mockup');
+    });
+
+    await test('the plan payload carries no target, budget or verdict for a view to render', async () => {
+      const r = await get(port, '/api/plan');
+      assert.ok(!/"(target|budget|remaining|goal|limit|deficit|surplus|verdict)"/i.test(r.body),
+        'the no-guilt rule holds by shape: the page cannot render a judgement it is never sent');
+    });
+
+    await test('the Plan tab markup matches the mockup: tiles 4-across, vertical slot labels', async () => {
+      const page = (await get(port, '/')).body;
+      // The mockup draws two rows of four tiles, not a single row of eight.
+      assert.ok(/\.favs\s*\{[^}]*repeat\(4,/.test(page), 'favourites grid must be four across');
+      assert.ok(/\.grid\s*\{[^}]*repeat\(6,/.test(page), 'six day columns');
+      assert.ok(page.includes('writing-mode: vertical-rl'), 'slot labels run vertically, per the mockup');
+      assert.ok(page.includes('Search your food library'), 'the search field');
+    });
+
+    await test('the Plan tab offers tap-to-assign, not drag alone', async () => {
+      // The phone path. Drag-and-drop is unusable at 400px, so tap has to be a
+      // first-class interaction rather than a touch shim bolted on afterwards.
+      const page = (await get(port, '/')).body;
+      assert.ok(page.includes('arm-bar'), 'the armed-meal banner');
+      assert.ok(/tap a meal slot/i.test(page), 'and it must say what to do next');
+    });
+
+    await test('the plan API refuses a Sunday date outright', async () => {
+      const plan = JSON.parse((await get(port, '/api/plan')).body);
+      const d = new Date(`${plan.weekStart}T12:00:00Z`);
+      d.setUTCDate(d.getUTCDate() + 6);
+      const sunday = d.toISOString().slice(0, 10);
+      const r = await post(port, '/api/plan/assign', { week: plan.weekStart, date: sunday, slot: 'dinner', foodId: 'whatever' });
+      assert.strictEqual(r.status, 400);
+      assert.ok(/free day/i.test(r.body), r.body);
+    });
+
     await test('GET /api/weight is trend-only, with no target or verdict in the payload', async () => {
       const r = await get(port, '/api/weight');
       assert.strictEqual(r.status, 200);
@@ -1270,6 +1492,7 @@ async function main() {
   await secretTests();
   await toolTests();
   await foodLibraryTests();
+  await plannerTests();
   await stretchTests();
   await movementTests();
   await weightTests();
