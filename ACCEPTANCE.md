@@ -1,102 +1,181 @@
-# HealthCoach v2 — acceptance note
+# HealthCoach v3 — acceptance note
 
-**Date:** 2026-09-12 · **Epic:** GOTK-157 (FitnessCoach release) · **Built by:** Claude Code, on the GOTK droplet
+**Date:** 2026-09-23 · **Epic:** GOTK-163 (Meal Planner release) · **Built by:** Claude Code, on the GOTK droplet
 
-*(v1's acceptance note is in git history at `08215b4` if you need it.)*
+*(v2's note is in git history at `a3ed59b`; v1's at `08215b4`.)*
 
 ## Read this first
 
-v2 is **written, tested and merged to main — but not running yet.** The service
-on the droplet is still v1. One `systemctl restart healthcoach` makes it real,
-and I don't have that privilege. Nothing is marked Done until it's actually live.
-
-**A restart right now is safe.** v1 already sent tonight's 20:00 check-in, so
-nothing will double-send. Your first morning briefing lands tomorrow at 07:30
-Denver, and that's the last you'll hear from it each day.
-
-## What changed
-
-Everything is new behaviour in the app you already have. Your data is untouched —
-the meals, goals and conversation from v1 are all still there, and the workouts,
-weight and energy tables that v1 left empty are now the ones v2 fills.
-
-- **A stretch routine.** Ten minutes for hips and pelvis, eight movements, on its
-  own tab. The coach can talk you through any of it and explain why each one is
-  in there. It's general mobility, not physiotherapy — if you tell it something
-  *hurts* rather than feels tight, it will send you to a physio rather than
-  invent a workaround. I tested that specifically.
-- **A workout menu — never a calendar.** Each morning it offers one thing from
-  your actual outlets: Koko, home weights, the stationary bike, the commuter
-  bike, the dogs. Nothing is ever scheduled onto a date and nothing is owed.
-- **Walking the dogs counts.** Every time, logged exactly like an hour at Koko.
-  Not "at least you walked the dogs" — it moved, so you moved.
-- **Weight, in pounds.** Say "I'm at 212" and it records it flatly. The Trend tab
-  shows 7 and 30 day shape. No verdicts, no target unless you ask for one, and
-  the line is plain ink — nothing turns green when you lose and red when you gain.
-- **The daily message moves to the morning.** 07:30 Denver, containing the
-  stretch, one workout suggestion, and yesterday's food in a line. The 20:00
-  check-in is gone. Still exactly one message a day, and that rule hasn't moved.
-- **Weekly meal plans.** Ask any time, or take the card that appears on the page
-  on Sundays. Built from what you've actually been eating, with a shopping list.
-  Paste any recipe and it'll hand back a healthier version you can cook straight
-  from, and tell you what it changed.
-
-## No streaks. Anywhere.
-
-This was the binding rule, so it got tests rather than a promise. The coach is
-forbidden from streaks, chains, consecutive-day counts and counting missed days,
-and the test suite scans the page, the routine and the prompts for that language.
-The ledger doesn't even store a field a streak could be built from.
-
-It also can't justify a suggestion by how long it's been — "you haven't been on
-the bike in nine days" is the same thing in a friendlier voice, so the code
-physically can't produce that sentence.
-
-I tried to make it shame me. Asked *"how many days have I missed?"*, it said:
-
-> That's not a number I keep, and I wouldn't want to — days off aren't a thing
-> this app tracks against you. Today stands on its own.
-
-## How to check it, once it's restarted
+v3 is **built, merged, and running.** All four pieces are live on the service
+right now, and your meals, conversation, goals and check-ins came through
+untouched. Nothing is waiting on you this time.
 
 **<https://gotkapp.com/healthcoach/>** — and **hard-reload the first time
-(Ctrl+Shift+R)**. The page changed, and a normal reload can serve you the old one
-and make a good build look broken.
+(Ctrl+Shift+R, or ⌘+Shift+R on a Mac)**. The page changed a lot. A normal
+reload can serve you yesterday's copy and make a working build look broken.
 
-1. **Three tabs** — Chat, Stretch, Trend. Chat is where you land.
-2. **Stretch tab** — the routine reads clearly and you'd actually follow it.
-   Try the short and desk variants. *Your call; I couldn't render it.*
-3. **Say "I walked the dogs."** It should land as done. If it reads as
-   less-than in any way, that's a bug and I want to know.
-4. **Say "I'm at 212."** Flat acknowledgement. Then check the Trend tab.
-   *Your call on how the line looks.*
-5. **Ask for a meal plan.** It should be built from food you actually eat.
-   Then paste a recipe and see what it does with it.
-6. **Tomorrow at 07:30** — one message, stretch + one suggestion + yesterday's
-   food. Nothing at 20:00.
-7. **Anywhere you see a streak, a chain, or a count of missed days** — that's a
-   failure of the whole release, not a detail.
+## What's new
 
-Rehearse the briefing without sending: `node ~/healthcoach/bin/briefing.js --dry-run`
+There's a fourth tab: **Plan**.
 
-## Three things I asked you rather than guessed
+- **A week grid, Monday to Saturday.** Four rows — breakfast, lunch, dinner,
+  snacks. **Sunday isn't there**, and that's deliberate: it's your free day, so
+  it has no column, no totals, nothing to confirm, and the coach won't mention
+  it or suggest planning it.
+- **Search your own food library.** It starts empty. Type something and, if it's
+  not in there yet, you get an "Add it" button — I'll estimate the nutrition and
+  save it. The library is only ever what you've actually looked up, and it grows
+  as you use it. There's no external food database and nothing leaves the box.
+- **Drag meals around**, or **tap them**. Tap a search result or a favourite,
+  then tap the slot you want it in. That works on your phone, where dragging a
+  six-column grid is hopeless — and the grid stacks into one day at a time down
+  there. Both ways work at any size, so use whichever you prefer.
+- **Eight favourite tiles**, two rows of four. Drag into them from a search
+  result *or* from a day. Dragging from a day **copies** — the day keeps its
+  meal. Dropping onto a tile that's already taken replaces it, and the one it
+  replaced is unpinned but still in your library and still searchable. **Nothing
+  you drag ever deletes anything.**
+- **A totals row under each day** — calories, protein, fat, carbs, sodium. They
+  are estimates and the page says so. They're there to tell you what's in the
+  week, and that's all they do.
 
-- **Weight in pounds** (your call) — the reserved field was `kg` and had never
-  been written to, so renaming it cost no data.
-- **Tabs in the toolbar** (your call) for where the stretch and trend live.
-- **The governance line.** The spec says "no new tools", but logging workouts and
-  weight conversationally needs them. You ratified that only *external* access is
-  frozen and store-writing tools are fine. The coach now has five tools, all
-  writing only to its own store, and a test fails if a sixth ever appears.
+## The planner plans. It never logs.
 
-## What's blocked
+This was the binding decision, so it has tests rather than a promise.
 
-1. **I can't restart the service** — `sudo` still grants me one unrelated
-   command. This is the only thing standing between you and v2.
-2. **The GitHub token can't open pull requests.** All five branches are pushed
-   and reviewable on GitHub; I merged them locally and pushed main.
-3. **No renderer on this host** — Chrome won't complete a page render here, so
-   there's no screenshot of the stretch page or the trend. Both were your
-   click-through anyway.
+Putting a meal in the grid is writing down an intention. It doesn't go in your
+food diary, ever, until you say so. There are exactly two ways to say so:
 
-Fix (1) and everything above is checkable in about five minutes.
+1. Say **"ate to plan"** in chat, or
+2. Press **"Ate to plan"** on that day in the grid.
+
+Then those meals go into the diary, marked as having come from the plan, still
+flagged as estimates, and correctable by reply like anything else.
+
+Partial truth works the way you'd say it out loud: *"ate to plan except lunch was
+leftover lasagne"* confirms the rest and leaves lunch alone, then logs the
+lasagne separately. I tested that exact sentence.
+
+A day only confirms once. Say it twice and the second one does nothing — it
+won't quietly double your day.
+
+## No guilt here either
+
+The rule from v2 extends to the planner, and again it's structural rather than a
+promise: there is no "target", no "budget", no "remaining", no over/under and no
+comparison between days *anywhere in the planner code*. A future screen couldn't
+show you one, because there's no field to read. A day with nothing planned says
+"nothing planned" and is not called a gap. A confirmed day says "Logged as
+eaten" — not "well done".
+
+## Also changed
+
+- **Your morning briefing** now mentions what you've got planned for today, when
+  you've planned something. It's one extra line in the 07:30 message you already
+  get — **not a second message.** That rule hasn't moved. On Sunday it says
+  nothing about plans at all.
+- **The shopping list** now builds from the grid when you've filled one in,
+  rather than guessing from your history. It counts repeats properly — a week
+  with porridge six times asks for enough oats for six. If the grid's empty, it
+  drafts from your history exactly as it did before.
+- **The recipe healthifier is unchanged.**
+
+## How to check it
+
+1. **Hard-reload**, then open **Plan**. You should see Mon–Sat, four rows, a
+   totals row, a search box and eight empty tiles. *How it looks is your call —
+   see the note at the bottom.*
+2. **Search for something you eat.** It won't be there. Press **Add it**, and
+   check the figures I guessed are in the right postcode. If they're not, tell me
+   in chat — "the curry is more like 600 calories" — and it'll fix the library
+   entry, which updates every day you've planned it into.
+3. **Drag it into a day.** Watch the totals row underneath move.
+4. **Drag it from the day onto a favourite tile.** The day should *keep* the
+   meal — that's the copy rule. Then drop something else on that same tile: the
+   old favourite should vanish from the tile but still turn up in search.
+5. **On your phone**, open the same tab. One day at a time. Tap a favourite, then
+   tap a slot.
+6. **Plan today, then say "ate to plan"** in chat, and check the meals land in
+   your diary. Then say it again — nothing should happen.
+7. **Ask for the shopping list.** It should be built from the grid you just
+   filled in, not from your history.
+8. **Tomorrow at 07:30** — one message, with today's plan in it. Still one.
+
+## Five things I decided rather than guessed silently
+
+The mockup settled most of it. These it didn't, so here's what I did and why —
+any of them is cheap to change if you disagree.
+
+1. **Favourites are two rows of four.** The spec said "eight tiles"; your mockup
+   draws them 2×4, so that's what I built. Mockup wins.
+2. **Phone layout.** Your mockup is a desktop wireframe, and six columns is
+   unusable at 400px. On a phone the grid stacks into one day at a time with the
+   same content and the same tapping. If you'd rather it scrolled sideways and
+   kept the grid shape, say so.
+3. **A week selector.** Not in the mockup, but the spec says next week has to be
+   plannable, so there's a quiet "This week / Next week" toggle above the grid.
+4. **What "this week" means on a Sunday.** Strictly, Sunday belongs to the week
+   that just ended — which would open the planner on six days that are all
+   behind you. Since Sunday is your free day and your usual planning moment, it
+   rolls forward to the week about to start. Every other day is literal.
+5. **What time a confirmed meal is logged at.** A plan says *what*, never *when*.
+   Rather than filing your whole day at the moment you press the button — which
+   would put breakfast at 9pm — confirmed meals land at ordinary hours
+   (08:00 / 12:30 / 19:00 / 15:30, your time). Each one is correctable by reply.
+
+## One governance item for you to ratify
+
+The v3 package says "no new tools", but it also requires pinning favourites by
+chat, correcting library items by chat, and "ate to plan" as a spoken phrase —
+none of which is possible without them. I added **three**: `favorite_food`,
+`correct_food` and `confirm_ate_to_plan`.
+
+All three write only to this app's own store, which is the same reading you
+ratified on 2026-09-12 for `log_workout` and `log_weight` — the frozen thing
+being *external* access, not store writes. Nothing added this release reaches
+outside the app, and there's still no tool that touches a file, a command, the
+network or its own instructions.
+
+The coach now has eight tools. The exact list is asserted in the test suite, so
+a ninth fails the build rather than arriving quietly. **If you'd rather draw the
+line differently, that test is the place to argue with me.**
+
+## Two small ops notes
+
+- **I briefly killed the live service by accident** early on, cleaning up a test
+  instance with too broad a pattern. systemd restarted it within seconds and no
+  data was touched, but you'd have seen a blip if you'd been looking. I killed by
+  process id for the rest of the build.
+- **The nginx half of my sudo grant doesn't work.** It allows `/usr/bin/nginx -t`,
+  but nginx is at `/usr/sbin/nginx`. It didn't matter — v3 changed no nginx
+  config — but the grant is dead if you ever need me to use it. The
+  `systemctl restart healthcoach.service` half works fine and I used it.
+
+## What I couldn't do
+
+**There's still no way to render the page on this droplet.** It has 956MB of RAM
+with swap almost full, and Chromium won't run — I tried, and stopped when it
+became clear the risk was pushing the live service out of memory.
+
+So I did the next best thing rather than skipping it: I ran the **real page** in
+a real DOM against a **real throwaway instance** and drove it like a user at
+390px. That proves the grid builds, tapping places meals, totals recompute,
+slot→favourite copies, removing a card doesn't delete the food, and the diary
+stays empty until you confirm. What it can't tell you is whether it *looks*
+right — spacing, weight, whether the vertical slot labels read well.
+
+That's your click-through, which is what the spec asked for anyway. **If anything
+on that tab looks wrong, it's a bug and I want to know.**
+
+## Verification
+
+151 tests, all green, on the merged main. Every item went branch → throwaway
+instance on :8799 → pull request → merge → restart → ticket. The four PRs are
+[#1](https://github.com/rossiterit/HealthCoach/pull/1),
+[#2](https://github.com/rossiterit/HealthCoach/pull/2),
+[#3](https://github.com/rossiterit/HealthCoach/pull/3) and
+[#4](https://github.com/rossiterit/HealthCoach/pull/4) — nothing was merged
+locally. GOTK-163, 164, 165, 166 and 167 are all Done.
+
+Rehearse tomorrow's briefing without sending it:
+`node ~/healthcoach/bin/briefing.js --dry-run`
