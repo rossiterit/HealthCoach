@@ -34,6 +34,7 @@ const briefing = require('./lib/briefing');
 const nutrition = require('./lib/nutrition');
 const foods = require('./lib/foods');
 const planner = require('./lib/planner');
+const atetoplan = require('./lib/atetoplan');
 const telegram = require('./lib/telegram');
 
 const cfg = load();
@@ -362,6 +363,22 @@ async function route(req, res, url) {
     const weeks = planner.plannableWeeks(new Date(), cfg.timezone);
     const weekStart = weeks.includes(body.week) ? body.week : weeks[0];
     const action = p.slice('/api/plan/'.length);
+
+    // The plan -> log bridge (F3). Deliberately the ONLY route under /api/plan/
+    // that can touch `meals`, and it happens because the owner pressed a
+    // control that says what it will do. Nothing polls it, nothing schedules it.
+    if (action === 'confirm') {
+      const out = atetoplan.confirm(store, cfg, body.date, { except: body.except || [] });
+      if (out.error) return send(res, 409, { error: out.error });
+      return send(res, 200, {
+        ok: true,
+        date: out.date,
+        logged: out.logged.map(publicMeal),
+        skipped: out.skipped,
+        message: atetoplan.echo(out),
+        plan: planner.view(store, cfg, weekStart),
+      });
+    }
 
     let out;
     if (action === 'assign') out = planner.assign(store, weekStart, body);

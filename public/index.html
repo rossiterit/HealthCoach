@@ -339,6 +339,17 @@
   .fav .fx { border: none; background: none; font: inherit; color: var(--muted); cursor: pointer; padding: 0 2px; }
   .fav .fx:hover { color: var(--ac-clay); }
 
+  /* The "ate to plan" control. Quiet, never a nag: a day with no plan shows
+     nothing at all, and a confirmed day states a fact rather than praising. */
+  .confirmbar { display: flex; justify-content: center; min-height: 22px; }
+  .confirmbtn {
+    font: inherit; font-size: 11px; padding: 3px 12px; border-radius: 12px;
+    border: 1px solid var(--line); background: var(--card); color: var(--muted); cursor: pointer;
+  }
+  .confirmbtn:hover { color: var(--ink); border-color: var(--ink); }
+  .confirmbtn:disabled { opacity: .5; cursor: default; }
+  .confirmed { font-size: 10px; color: var(--ac-green); letter-spacing: .04em; align-self: center; }
+
   .plan-msg { font-size: 12px; color: var(--muted); min-height: 17px; }
   .plan-msg.warn { color: var(--warn-text); }
 
@@ -948,6 +959,35 @@ async function dropIntoSlot(payload, date, slot) {
   } catch (e) { planMsg(e.message, true); }
 }
 
+/**
+ * The per-day confirm control (F3) — the other half of "ate to plan".
+ *
+ * It says what it will do before it does it, and it only appears on a day that
+ * has something planned and has not been confirmed. It is never automatic and
+ * nothing here polls: Decision 1 says the owner does this deliberately or it
+ * does not happen.
+ */
+function confirmNode(day) {
+  if (!day.totals.count) return null;
+
+  if (day.confirmed) {
+    const done = el('div', 'confirmed', 'Logged as eaten');
+    return done;
+  }
+  const b = el('button', 'confirmbtn', 'Ate to plan');
+  b.title = `Log ${day.weekday}'s planned meals to your food diary`;
+  b.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    b.disabled = true;
+    try {
+      const out = await planApi('/plan/confirm', { week: plan.week, date: day.date });
+      applyPlanPayload(out);
+      planMsg(out.message);
+    } catch (err) { planMsg(err.message, true); b.disabled = false; }
+  });
+  return b;
+}
+
 function cellNode(day, slot, stacked) {
   const cell = el('div', 'cell' + (plan.armed ? ' armed' : ''));
   if (stacked) cell.appendChild(el('div', 'slotname', slot.label));
@@ -1015,6 +1055,8 @@ function renderPlan() {
       block.appendChild(hd);
       day.slots.forEach((slot) => block.appendChild(cellNode(day, slot, true)));
       block.appendChild(totalsNode(day.totals));
+      const c = confirmNode(day);
+      if (c) { const bar = el('div', 'confirmbar'); bar.appendChild(c); block.appendChild(bar); }
       grid.appendChild(block);
     });
   } else {
@@ -1032,6 +1074,14 @@ function renderPlan() {
     });
     grid.appendChild(el('div', 'corner'));
     d.days.forEach((day) => grid.appendChild(totalsNode(day.totals)));
+    // The confirm row sits under the totals, one control per day.
+    grid.appendChild(el('div', 'corner'));
+    d.days.forEach((day) => {
+      const bar = el('div', 'confirmbar');
+      const c = confirmNode(day);
+      if (c) bar.appendChild(c);
+      grid.appendChild(bar);
+    });
   }
   host.appendChild(grid);
 

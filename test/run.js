@@ -29,6 +29,7 @@ const secrets = require(path.join(ROOT, 'lib/secrets'));
 const dietcoach = require(path.join(ROOT, 'lib/dietcoach'));
 const foods = require(path.join(ROOT, 'lib/foods'));
 const planner = require(path.join(ROOT, 'lib/planner'));
+const atetoplan = require(path.join(ROOT, 'lib/atetoplan'));
 const coach = require(path.join(ROOT, 'lib/coach'));
 const stretch = require(path.join(ROOT, 'lib/stretch'));
 const workouts = require(path.join(ROOT, 'lib/workouts'));
@@ -42,6 +43,7 @@ let passed = 0;
 // governance act, not a refactor: it belongs in an acceptance note and in front
 // of the owner. See the governance test for the reasoning behind each addition.
 const RATIFIED_TOOLS = [
+  'confirm_ate_to_plan',
   'correct_food',
   'correct_meal',
   'favorite_food',
@@ -670,6 +672,156 @@ async function plannerTests() {
     assert.ok(/Dinner: Curry/.test(line), line);
     assert.ok(!/kcal|calorie|total/i.test(line), 'the briefing line names meals, it does not score the day');
     assert.strictEqual(planner.plannedLine(s, CFG, '2026-09-27'), null, 'never on Sunday');
+  });
+}
+
+// ---------------------------------------------------------------------------
+// "ate to plan" — the one bridge from plan to log (v3 F3, GOTK-166)
+// ---------------------------------------------------------------------------
+
+async function ateToPlanTests() {
+  const WEEK = '2026-09-21';
+  const WED = '2026-09-23';
+
+  function withPlan() {
+    const s = new Store(tmpDir()).load();
+    const porridge = s.addFood({ name: 'Porridge', nutrition: { calories_kcal: 300, protein_g: 12 } });
+    const curry = s.addFood({ name: 'Curry', nutrition: { calories_kcal: 700, protein_g: 35 } });
+    const soup = s.addFood({ name: 'Soup', nutrition: { calories_kcal: 200 } });
+    planner.assign(s, WEEK, { date: WED, slot: 'breakfast', foodId: porridge.id });
+    planner.assign(s, WEEK, { date: WED, slot: 'lunch', foodId: soup.id });
+    planner.assign(s, WEEK, { date: WED, slot: 'dinner', foodId: curry.id });
+    return s;
+  }
+
+  await test('confirming writes the planned meals as planned_confirmed estimates', () => {
+    const s = withPlan();
+    const out = atetoplan.confirm(s, CFG, WED);
+    assert.ok(!out.error, out.error);
+    assert.strictEqual(out.logged.length, 3);
+    assert.deepStrictEqual(out.logged.map((m) => m.description).sort(), ['Curry', 'Porridge', 'Soup']);
+    for (const m of out.logged) {
+      assert.strictEqual(m.source, 'planned_confirmed', 'provenance must say where these came from');
+      assert.strictEqual(m.estimate, true, 'confirming an intention measures nothing');
+    }
+    assert.strictEqual(s.data.meals.length, 3);
+  });
+
+  await test('confirmed meals land at sensible times of day, on the right local date', () => {
+    // A plan says what, never when. Bucketing them all at the confirming moment
+    // would put breakfast at 9pm and make the day's shape a lie.
+    const s = withPlan();
+    const out = atetoplan.confirm(s, CFG, WED);
+    const byType = Object.fromEntries(out.logged.map((m) => [m.mealType, m.ts]));
+    assert.strictEqual(localDate(byType.breakfast, CFG.timezone), WED);
+    assert.strictEqual(localDate(byType.dinner, CFG.timezone), WED, 'dinner crosses UTC midnight and must still be today');
+    assert.ok(new Date(byType.breakfast) < new Date(byType.lunch));
+    assert.ok(new Date(byType.lunch) < new Date(byType.dinner));
+  });
+
+  await test('a day never confirms twice', () => {
+    const s = withPlan();
+    atetoplan.confirm(s, CFG, WED);
+    const second = atetoplan.confirm(s, CFG, WED);
+    assert.ok(second.error, 'the second confirmation must be refused');
+    assert.ok(/already confirmed/i.test(second.error), second.error);
+    assert.strictEqual(s.data.meals.length, 3, 'and must not double the day');
+  });
+
+  await test('a partial confirmation leaves the excepted slot out entirely', () => {
+    const s = withPlan();
+    const out = atetoplan.confirm(s, CFG, WED, { except: ['lunch'] });
+    assert.deepStrictEqual(out.logged.map((m) => m.description).sort(), ['Curry', 'Porridge']);
+    assert.deepStrictEqual(out.skipped, ['lunch']);
+    assert.ok(!s.data.meals.some((m) => m.description === 'Soup'), 'the planned lunch must not be logged');
+    assert.ok(/left lunch out/i.test(atetoplan.echo(out)), atetoplan.echo(out));
+  });
+
+  await test('"snack" and "snacks" both work in an exception', () => {
+    const s = withPlan();
+    const yog = s.addFood({ name: 'Yoghurt', nutrition: { calories_kcal: 120 } });
+    planner.assign(s, WEEK, { date: WED, slot: 'snacks', foodId: yog.id });
+    const out = atetoplan.confirm(s, CFG, WED, { except: ['snack'] });
+    assert.ok(!out.logged.some((m) => m.description === 'Yoghurt'), "the owner's wording should not matter");
+  });
+
+  await test('Sunday can never be confirmed', () => {
+    const s = withPlan();
+    const out = atetoplan.confirm(s, CFG, '2026-09-27');
+    assert.ok(out.error);
+    assert.ok(/free day/i.test(out.error), out.error);
+    assert.strictEqual(s.data.meals.length, 0);
+  });
+
+  await test('a day with nothing planned says so rather than logging nothing quietly', () => {
+    const s = withPlan();
+    const out = atetoplan.confirm(s, CFG, '2026-09-24');
+    assert.ok(out.error);
+    assert.ok(/nothing planned/i.test(out.error), out.error);
+  });
+
+  await test('confirming does not empty the plan — the grid still shows the week', () => {
+    const s = withPlan();
+    atetoplan.confirm(s, CFG, WED);
+    const wed = planner.view(s, CFG, WEEK).days.find((d) => d.date === WED);
+    assert.strictEqual(wed.slots.find((x) => x.slot === 'dinner').cards.length, 1);
+    assert.strictEqual(wed.confirmed, true, 'but it is marked as confirmed');
+  });
+
+  await test('a confirmed meal is an ordinary row — correctable by reply like any other', () => {
+    const s = withPlan();
+    const out = atetoplan.confirm(s, CFG, WED);
+    const row = out.logged.find((m) => m.description === 'Porridge');
+    const fixed = dietcoach.runTool(s, CFG, 'correct_meal', {
+      meal_id: row.id,
+      description: 'Porridge, but a big bowl',
+      items: [{ name: 'Porridge', nutrition: { calories_kcal: 450 } }],
+    });
+    assert.ok(/Corrected/.test(fixed.result), fixed.result);
+    assert.strictEqual(s.getMeal(row.id).nutrition.calories_kcal, 450);
+  });
+
+  await test('the tool refuses a second confirmation and reports it plainly', () => {
+    const s = withPlan();
+    dietcoach.runTool(s, CFG, 'confirm_ate_to_plan', { date: WED });
+    const again = dietcoach.runTool(s, CFG, 'confirm_ate_to_plan', { date: WED });
+    assert.ok(/already confirmed/i.test(again.result), again.result);
+    assert.ok(!again.logged, 'a refused confirmation logs nothing');
+  });
+
+  await test('the tool logs several rows at once, and the coach collects them all', () => {
+    // coach.js gathers tool output into one `logged` list; confirming a day is
+    // the first tool that returns more than one row.
+    const s = withPlan();
+    const out = dietcoach.runTool(s, CFG, 'confirm_ate_to_plan', { date: WED });
+    assert.ok(Array.isArray(out.logged), 'the payload is a list');
+    assert.strictEqual(out.logged.length, 3);
+    assert.ok(out.logged.every((r) => r.kind === 'meal'), 'each tagged so the page renders a meal card');
+  });
+
+  await test("the prompt shows today's plan without ever nagging about it", () => {
+    const s = withPlan();
+    const block = dietcoach.planBlock(s, CFG);
+    for (const nag of [/did you/i, /stick to/i, /remember to/i, /don't forget/i, /should have/i]) {
+      assert.ok(!nag.test(block), `the plan context must not nag: ${nag}`);
+    }
+    assert.ok(/intentions, not a log|free day|nothing planned/i.test(block), block.slice(0, 120));
+  });
+
+  await test('an unplanned day is not framed as a gap', () => {
+    const s = new Store(tmpDir()).load();
+    const block = dietcoach.planBlock(s, CFG);
+    if (/nothing planned/i.test(block)) {
+      assert.ok(/not a gap/i.test(block), 'an empty day must be stated, not mourned');
+    }
+  });
+
+  await test('the coach is told plainly that nothing auto-logs', () => {
+    const s = withPlan();
+    const p = dietcoach.persona(s);
+    assert.ok(/never becomes one on its own/i.test(p), 'Decision 1 must be in the prompt');
+    assert.ok(/ate to plan/i.test(p));
+    assert.ok(/A day confirms once/i.test(p));
   });
 }
 
@@ -1493,6 +1645,7 @@ async function main() {
   await toolTests();
   await foodLibraryTests();
   await plannerTests();
+  await ateToPlanTests();
   await stretchTests();
   await movementTests();
   await weightTests();
