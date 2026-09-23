@@ -33,6 +33,7 @@ const weight = require('./lib/weight');
 const briefing = require('./lib/briefing');
 const nutrition = require('./lib/nutrition');
 const foods = require('./lib/foods');
+const planner = require('./lib/planner');
 const telegram = require('./lib/telegram');
 
 const cfg = load();
@@ -329,6 +330,58 @@ async function route(req, res, url) {
       // The replaced pin is unpinned, never deleted (Decision 5).
       replaced: out.replaced ? foods.publicFood(store.getFood(out.replaced), null) : null,
       deleted: false,
+    });
+  }
+
+  // --- the week grid (v3 F2) ----------------------------------------------
+  //
+  // Every mutation here writes to `plans` and nowhere else. There is no route
+  // in this block that can reach `meals`: the plan-to-log bridge is F3's
+  // explicit confirmation, and Decision 1 is worth enforcing by layout as well
+  // as by intent.
+
+  if (method === 'GET' && p === '/api/plan') {
+    const weeks = planner.plannableWeeks(new Date(), cfg.timezone);
+    const asked = url.searchParams.get('week');
+    // Only the current and next week are addressable, per Decision 3. An
+    // unknown week falls back to the default rather than 404ing, so a stale
+    // bookmark opens the planner instead of an error.
+    const weekStart = weeks.includes(asked) ? asked : weeks[0];
+    return send(res, 200, {
+      ...planner.view(store, cfg, weekStart),
+      weeks,
+      today: localDate(new Date(), cfg.timezone),
+      favorites: favoritesPayload(),
+      // Said once, here, so the page never has to decide how to label a figure.
+      estimateNote: 'Totals are estimates.',
+    });
+  }
+
+  if (method === 'POST' && p.startsWith('/api/plan/')) {
+    const body = await readJson(req);
+    const weeks = planner.plannableWeeks(new Date(), cfg.timezone);
+    const weekStart = weeks.includes(body.week) ? body.week : weeks[0];
+    const action = p.slice('/api/plan/'.length);
+
+    let out;
+    if (action === 'assign') out = planner.assign(store, weekStart, body);
+    else if (action === 'move') out = planner.move(store, weekStart, body.entryId, body);
+    else if (action === 'remove') out = planner.remove(store, weekStart, body.entryId);
+    else if (action === 'pin') out = planner.pinFromSlot(store, weekStart, body.entryId, body.slot ?? null);
+    else return send(res, 404, { error: 'No such endpoint.' });
+
+    if (out.error === 'board full') {
+      return send(res, 409, { error: 'All eight tiles are taken. Drop it on the tile you want to replace.' });
+    }
+    if (out.error) return send(res, 400, { error: out.error });
+    // The whole week goes back on every change: the grid is small, and a client
+    // that re-renders from one authoritative payload cannot drift out of step
+    // with the store the way an optimistic patch eventually does.
+    return send(res, 200, {
+      ok: true,
+      ...out,
+      plan: planner.view(store, cfg, weekStart),
+      favorites: favoritesPayload(),
     });
   }
 
