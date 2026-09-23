@@ -23,10 +23,11 @@ const http = require('http');
 const { spawn } = require('child_process');
 
 const ROOT = path.join(__dirname, '..');
-const { Store, localDate } = require(path.join(ROOT, 'lib/store'));
+const { Store, localDate, SCHEMA_VERSION, FAVORITE_SLOTS } = require(path.join(ROOT, 'lib/store'));
 const nutrition = require(path.join(ROOT, 'lib/nutrition'));
 const secrets = require(path.join(ROOT, 'lib/secrets'));
 const dietcoach = require(path.join(ROOT, 'lib/dietcoach'));
+const foods = require(path.join(ROOT, 'lib/foods'));
 const coach = require(path.join(ROOT, 'lib/coach'));
 const stretch = require(path.join(ROOT, 'lib/stretch'));
 const workouts = require(path.join(ROOT, 'lib/workouts'));
@@ -36,6 +37,19 @@ const briefing = require(path.join(ROOT, 'lib/briefing'));
 const telegram = require(path.join(ROOT, 'lib/telegram'));
 
 let passed = 0;
+// The exact tool surface the owner has ratified. Adding a name here is a
+// governance act, not a refactor: it belongs in an acceptance note and in front
+// of the owner. See the governance test for the reasoning behind each addition.
+const RATIFIED_TOOLS = [
+  'correct_food',
+  'correct_meal',
+  'favorite_food',
+  'log_meal',
+  'log_weight',
+  'log_workout',
+  'save_goals',
+];
+
 const failures = [];
 function test(name, fn) {
   return Promise.resolve()
@@ -105,7 +119,28 @@ async function storeTests() {
     const s = new Store(dir).load();
     assert.strictEqual(s.data.meals.length, 1);
     assert.deepStrictEqual(s.data.energy, []);
-    assert.strictEqual(s.data.schemaVersion, 1);
+    assert.strictEqual(s.data.schemaVersion, SCHEMA_VERSION);
+    // v3's tables arrive the same way: present and empty, nothing migrated.
+    assert.deepStrictEqual(s.data.foods, []);
+    assert.deepStrictEqual(s.data.plans, {});
+    assert.strictEqual(s.data.favorites.length, FAVORITE_SLOTS);
+    assert.ok(s.data.favorites.every((v) => v === null));
+  });
+
+  await test('a favourites board of the wrong length is normalised, keeping its pins', () => {
+    // Guards the Object.assign merge: it replaces the board wholesale, so a
+    // store written by a build with a different tile count would come back the
+    // wrong length and silently lose or invent slots.
+    const dir = tmpDir();
+    fs.writeFileSync(
+      path.join(dir, 'store.json'),
+      JSON.stringify({ foods: [{ id: 'food_a', name: 'porridge' }], favorites: ['food_a', 'food_b'] }),
+    );
+    const s = new Store(dir).load();
+    assert.strictEqual(s.data.favorites.length, FAVORITE_SLOTS);
+    assert.strictEqual(s.data.favorites[0], 'food_a', 'existing pins survive');
+    assert.strictEqual(s.data.favorites[1], 'food_b');
+    assert.strictEqual(s.data.favorites[7], null);
   });
 
   await test('localDate follows the owner wall clock, not UTC', () => {
@@ -250,8 +285,15 @@ async function toolTests() {
     // change control, not a code review. v2's log_workout/log_weight were
     // ratified by the owner on 2026-09-12 as same-class store writes; the
     // frozen thing is external access (calendar, APIs) per Decision 8.
+    //
+    // v3 adds three on the same ratified reading — favorite_food and
+    // correct_food (F1 requires pinning and correcting the library BY CHAT) and
+    // confirm_ate_to_plan (F3's bridge is explicitly a chat phrase). All three
+    // write to this app's own store and nowhere else. The v3 package repeats
+    // "no new tools", so this is flagged to the owner in the acceptance note
+    // rather than treated as settled; the list below is the thing to argue with.
     const names = coach.allTools().map((t) => t.name).sort();
-    assert.deepStrictEqual(names, ['correct_meal', 'log_meal', 'log_weight', 'log_workout', 'save_goals']);
+    assert.deepStrictEqual(names, RATIFIED_TOOLS);
     for (const t of coach.allTools()) {
       assert.ok(coach.ownerOf(t.name), `${t.name} must belong to a module`);
     }
@@ -279,6 +321,187 @@ async function toolTests() {
     const s = new Store(tmpDir()).load();
     const sys = coach.buildSystem(s, CFG);
     assert.ok(sys.includes('ONBOARDING INTERVIEW'), 'the first conversation must interview');
+  });
+}
+
+// ---------------------------------------------------------------------------
+// the food library (v3 F1, GOTK-164)
+// ---------------------------------------------------------------------------
+
+async function foodLibraryTests() {
+  /** A library with a known shape, for the search and favourites tests. */
+  function stocked() {
+    const s = new Store(tmpDir()).load();
+    s.addFood({ name: 'Eggs', kind: 'food', nutrition: { calories_kcal: 140, protein_g: 12 } });
+    s.addFood({ name: 'Eggs Benedict', kind: 'meal', nutrition: { calories_kcal: 700 } });
+    s.addFood({ name: 'Porridge with berries', kind: 'meal', nutrition: { calories_kcal: 320, protein_g: 12 } });
+    s.addFood({ name: 'Friday curry', kind: 'meal', nutrition: { calories_kcal: 800, sodium_mg: 1900 } });
+    return s;
+  }
+
+  await test('search matches the owner library, shortest-exact first', () => {
+    const s = stocked();
+    const hit = foods.search(s, 'eggs');
+    assert.deepStrictEqual(hit.results.map((f) => f.name), ['Eggs', 'Eggs Benedict']);
+    assert.ok(hit.exact, 'an exact name match is reported as exact');
+    assert.strictEqual(hit.miss, false);
+  });
+
+  await test('search finds a word inside a name, and is punctuation-blind', () => {
+    const s = stocked();
+    assert.deepStrictEqual(foods.search(s, 'curry').results.map((f) => f.name), ['Friday curry']);
+    assert.deepStrictEqual(foods.search(s, 'EGGS!!').results.map((f) => f.name), ['Eggs', 'Eggs Benedict']);
+    assert.deepStrictEqual(foods.search(s, 'berries porridge').results.map((f) => f.name), ['Porridge with berries']);
+  });
+
+  await test('a query the library has never seen is a miss (which is what offers create)', () => {
+    const s = stocked();
+    const hit = foods.search(s, 'quinoa salad');
+    assert.deepStrictEqual(hit.results, []);
+    assert.strictEqual(hit.miss, true);
+  });
+
+  await test('a near-match is still a miss — "eggs florentine" is not "eggs"', () => {
+    // The distinction that makes create-on-miss work: results can be non-empty
+    // and the thing they typed still not be in the library.
+    const s = stocked();
+    const hit = foods.search(s, 'eggs florentine');
+    assert.ok(hit.results.length > 0, 'near matches are still shown');
+    assert.strictEqual(hit.miss, true, 'but the item itself is absent, so it can be created');
+  });
+
+  await test('search never writes — typing is not a library edit', () => {
+    const s = stocked();
+    const before = s.allFoods().length;
+    foods.search(s, 'something entirely new');
+    foods.search(s, 'a');
+    assert.strictEqual(s.allFoods().length, before);
+  });
+
+  await test('every library row is flagged as an estimate, and cannot claim otherwise', () => {
+    const s = new Store(tmpDir()).load();
+    const row = s.addFood({ name: 'x', nutrition: { calories_kcal: 1 }, estimate: false, source: 'measured' });
+    assert.strictEqual(row.estimate, true, 'v3 added no measured source; a row must not claim one');
+    const fixed = s.updateFood(row.id, { estimate: false });
+    assert.strictEqual(fixed.estimate, true, 'nor can a correction turn the flag off');
+    assert.strictEqual(foods.publicFood(row).estimate, true);
+  });
+
+  await test('pin takes the first free tile; the board is eight long', () => {
+    const s = stocked();
+    assert.strictEqual(s.favorites().length, FAVORITE_SLOTS);
+    const a = s.pinFavorite(s.data.foods[0].id);
+    const b = s.pinFavorite(s.data.foods[1].id);
+    assert.strictEqual(a.slot, 0);
+    assert.strictEqual(b.slot, 1);
+  });
+
+  await test('dropping onto an occupied tile overwrites it — and deletes nothing (Decision 5)', () => {
+    const s = stocked();
+    const [eggs, benedict] = s.data.foods;
+    s.pinFavorite(eggs.id, 3);
+    const out = s.pinFavorite(benedict.id, 3);
+    assert.strictEqual(out.slot, 3);
+    assert.strictEqual(out.replaced, eggs.id, 'the caller is told what it displaced');
+    assert.strictEqual(s.favorites()[3], benedict.id);
+    // The binding half of the decision: the old favourite survives.
+    assert.ok(s.getFood(eggs.id), 'the replaced favourite is still in the library');
+    assert.ok(foods.search(s, 'eggs').results.some((f) => f.id === eggs.id), 'and still findable by search');
+  });
+
+  await test('a food occupies at most one tile — re-pinning moves it rather than cloning it', () => {
+    const s = stocked();
+    const eggs = s.data.foods[0];
+    s.pinFavorite(eggs.id, 0);
+    s.pinFavorite(eggs.id, 5);
+    assert.deepStrictEqual(s.favorites().filter((id) => id === eggs.id).length, 1);
+    assert.strictEqual(s.favorites()[5], eggs.id);
+    assert.strictEqual(s.favorites()[0], null);
+  });
+
+  await test('a full board refuses an unaddressed pin rather than evicting a tile', () => {
+    // The owner never chose to lose a pin, so nothing picks one for them.
+    const s = new Store(tmpDir()).load();
+    for (let i = 0; i < FAVORITE_SLOTS; i++) s.pinFavorite(s.addFood({ name: `f${i}` }).id);
+    const extra = s.addFood({ name: 'one too many' });
+    assert.strictEqual(s.pinFavorite(extra.id).error, 'board full');
+    // An explicitly addressed tile still overwrites: that is a deliberate drop.
+    assert.strictEqual(s.pinFavorite(extra.id, 2).slot, 2);
+  });
+
+  await test('unpinning clears the tile and keeps the food', () => {
+    const s = stocked();
+    const eggs = s.data.foods[0];
+    s.pinFavorite(eggs.id, 4);
+    const was = s.unpinFavorite({ foodId: eggs.id });
+    assert.strictEqual(was, eggs.id);
+    assert.strictEqual(s.favorites()[4], null);
+    assert.ok(s.getFood(eggs.id), 'unpinning is not deleting');
+  });
+
+  await test('favorite_food pins by name, and creates the item when it is new', () => {
+    const s = stocked();
+    const out = dietcoach.runTool(s, CFG, 'favorite_food', {
+      action: 'pin',
+      name: 'Saturday chilli',
+      kind: 'meal',
+      quantity: '1 bowl',
+      nutrition: { calories_kcal: 650, protein_g: 40 },
+    });
+    assert.ok(/Pinned Saturday chilli/i.test(out.result), out.result);
+    const created = foods.search(s, 'Saturday chilli').exact;
+    assert.ok(created, 'pinning something new adds it to the library');
+    assert.strictEqual(created.estimate, true);
+    assert.strictEqual(created.nutrition.calories_kcal, 650);
+  });
+
+  await test('favorite_food on a full board asks rather than dropping someone\'s tile', () => {
+    const s = new Store(tmpDir()).load();
+    for (let i = 0; i < FAVORITE_SLOTS; i++) s.pinFavorite(s.addFood({ name: `f${i}` }).id);
+    const out = dietcoach.runTool(s, CFG, 'favorite_food', { action: 'pin', name: 'Late arrival' });
+    assert.ok(/not pinned/i.test(out.result), out.result);
+    assert.ok(/ask which tile/i.test(out.result), 'it must hand the choice back');
+    assert.ok(s.favorites().every(Boolean), 'and must not have evicted anything');
+  });
+
+  await test('favorite_food unpin says plainly that nothing was deleted', () => {
+    const s = stocked();
+    const eggs = s.data.foods[0];
+    s.pinFavorite(eggs.id, 0);
+    const out = dietcoach.runTool(s, CFG, 'favorite_food', { action: 'unpin', name: 'Eggs' });
+    assert.ok(/still in the library/i.test(out.result), out.result);
+    assert.ok(s.getFood(eggs.id));
+  });
+
+  await test('correct_food fixes the library entry, not the log', () => {
+    const s = stocked();
+    const curry = foods.search(s, 'Friday curry').exact;
+    const meal = s.addMeal({ description: 'Friday curry', nutrition: { calories_kcal: 800 } });
+    const out = dietcoach.runTool(s, CFG, 'correct_food', {
+      food_id: curry.id,
+      nutrition: { calories_kcal: 600, protein_g: 35 },
+    });
+    assert.ok(/Updated the library entry/i.test(out.result), out.result);
+    assert.strictEqual(s.getFood(curry.id).nutrition.calories_kcal, 600);
+    assert.strictEqual(s.getMeal(meal.id).nutrition.calories_kcal, 800, 'what was eaten is untouched');
+  });
+
+  await test('the library and the favourites board reach the coach with usable ids', () => {
+    const s = stocked();
+    const eggs = s.data.foods[0];
+    s.pinFavorite(eggs.id, 0);
+    const block = dietcoach.libraryBlock(s);
+    assert.ok(block.includes(eggs.id), 'ids must be present or the coach will guess one');
+    assert.ok(/tile 1: Eggs/.test(block));
+    assert.ok(/tile 8: \(empty\)/.test(block));
+  });
+
+  await test('the library block says nothing about good or bad food', () => {
+    const s = stocked();
+    const block = dietcoach.libraryBlock(s);
+    for (const bad of [/\bunhealthy\b/i, /\bbad choice\b/i, /\btreat\b/i, /\bshould avoid\b/i]) {
+      assert.ok(!bad.test(block), `library context must not moralise: ${bad}`);
+    }
   });
 }
 
@@ -586,10 +809,11 @@ async function mealPlanTests() {
   });
 
   await test('meal planning adds no new tool — it is conversation, not a capability', () => {
-    // The owner ratified log_workout and log_weight specifically. A plan lives
-    // in the chat, so F6 needs no further grant.
+    // The owner ratified log_workout and log_weight specifically. A conversational
+    // plan lives in the chat, so v2's F6 needed no further grant — and v3's grid
+    // does not change that: drag-and-drop goes over the HTTP API, not a tool.
     const names = coach.allTools().map((t) => t.name).sort();
-    assert.deepStrictEqual(names, ['correct_meal', 'log_meal', 'log_weight', 'log_workout', 'save_goals']);
+    assert.ok(!names.includes('plan_meal'), 'the grid is an API surface, not a model capability');
   });
 }
 
@@ -720,6 +944,12 @@ async function briefingTests() {
 
     const row = s.addCheckin('2026-09-16', 'sent', true);
     row.includedWeight = true;
+    // addCheckin stamps sentAt from the real wall clock, but every date in this
+    // test is simulated. Left alone the row reads as "sent today", so the
+    // seven-day window below gets measured from the day the suite is RUN — which
+    // passed in September 2026 and began failing as the real clock walked past
+    // the simulated dates. Pin it to the day it is pretending to be.
+    row.sentAt = '2026-09-16T07:30:00-06:00';
     const nextDay = briefing.assemble(s, CFG, new Date('2026-09-17T07:30:00-06:00'));
     assert.strictEqual(nextDay.weightLine, null, 'not two days running');
 
@@ -1039,6 +1269,7 @@ async function main() {
   await nutritionTests();
   await secretTests();
   await toolTests();
+  await foodLibraryTests();
   await stretchTests();
   await movementTests();
   await weightTests();

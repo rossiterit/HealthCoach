@@ -32,6 +32,7 @@ const workouts = require('./lib/workouts');
 const weight = require('./lib/weight');
 const briefing = require('./lib/briefing');
 const nutrition = require('./lib/nutrition');
+const foods = require('./lib/foods');
 const telegram = require('./lib/telegram');
 
 const cfg = load();
@@ -115,6 +116,11 @@ function publicEntry(row) {
   return { ...row, date: localDate(row.ts, cfg.timezone) };
 }
 
+/** The favourites board as the page renders it: eight positions, holes and all. */
+function favoritesPayload() {
+  return store.favorites().map((id, slot) => (id ? foods.publicFood(store.getFood(id), slot) : null));
+}
+
 // ---------------------------------------------------------------------------
 // routes
 // ---------------------------------------------------------------------------
@@ -144,6 +150,9 @@ async function route(req, res, url) {
         workouts: store.data.workouts.length,
         weight: store.data.weight.length,
         energy: store.data.energy.length,
+        foods: store.data.foods.length,
+        favorites: store.favorites().filter(Boolean).length,
+        plans: Object.keys(store.data.plans).length,
       },
       nutritionEngine: cfg.nutrition.engine,
       briefing: { enabled: cfg.briefing.enabled, time: cfg.briefing.time, timezone: cfg.briefing.timezone },
@@ -244,6 +253,82 @@ async function route(req, res, url) {
       nutrition: nutrition.total(meals.map((m) => ({ nutrition: m.nutrition }))),
       estimate: true,
       meals: meals.map(publicMeal),
+    });
+  }
+
+  // --- the food library: search, create-on-miss, favourites (v3 F1) --------
+  //
+  // Search is a GET and never writes: typing in the search field must not
+  // silently fill the library with half-typed words. Creating is a separate,
+  // explicit POST — which is also the only place in v3 that calls the model
+  // outside a conversational turn, and still writes only to this app's store.
+
+  if (method === 'GET' && p === '/api/foods') {
+    const q = url.searchParams.get('q');
+    const board = store.favorites();
+    const slotOf = (id) => {
+      const i = board.indexOf(id);
+      return i === -1 ? null : i;
+    };
+    if (q === null) {
+      return send(res, 200, {
+        foods: store.allFoods().map((f) => foods.publicFood(f, slotOf(f.id))),
+        favorites: favoritesPayload(),
+      });
+    }
+    const hit = foods.search(store, q);
+    return send(res, 200, {
+      query: hit.query,
+      results: hit.results.map((f) => foods.publicFood(f, slotOf(f.id))),
+      // `miss` is what the page uses to offer "add this to the library".
+      miss: hit.miss,
+      estimate: true,
+    });
+  }
+
+  if (method === 'POST' && p === '/api/foods') {
+    const body = await readJson(req);
+    const name = typeof body.name === 'string' ? body.name.trim() : '';
+    if (!name) return send(res, 400, { error: 'Send a non-empty "name".' });
+    try {
+      const out = await foods.findOrCreate(store, cfg, name);
+      const board = store.favorites();
+      return send(res, out.created ? 201 : 200, {
+        food: foods.publicFood(out.food, board.indexOf(out.food.id) === -1 ? null : board.indexOf(out.food.id)),
+        created: out.created,
+        estimate: true,
+      });
+    } catch (e) {
+      console.error('[foods]', e.message);
+      return send(res, 502, { error: e.message });
+    }
+  }
+
+  if (method === 'POST' && p === '/api/favorites') {
+    const body = await readJson(req);
+    const action = body.action === 'unpin' ? 'unpin' : 'pin';
+
+    if (action === 'unpin') {
+      const was = store.unpinFavorite({
+        slot: body.slot === undefined ? null : body.slot,
+        foodId: body.foodId || null,
+      });
+      // Nothing is deleted by an unpin — the row stays in the library. The
+      // response says so explicitly so a client cannot render it as a removal.
+      return send(res, 200, { favorites: favoritesPayload(), unpinned: was, deleted: false });
+    }
+
+    const out = store.pinFavorite(body.foodId, body.slot === undefined ? null : body.slot);
+    if (out.error === 'board full') {
+      return send(res, 409, { error: 'All eight tiles are taken. Drop the meal on the tile you want to replace.' });
+    }
+    if (out.error) return send(res, 400, { error: out.error });
+    return send(res, 200, {
+      favorites: favoritesPayload(),
+      slot: out.slot,
+      // The replaced pin is unpinned, never deleted (Decision 5).
+      replaced: out.replaced ? foods.publicFood(store.getFood(out.replaced), null) : null,
+      deleted: false,
     });
   }
 
