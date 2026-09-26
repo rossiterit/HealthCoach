@@ -31,9 +31,23 @@
     "engine": "estimate",
     "_note": "SnapCalorie descoped by owner 2026-09-10 (override of build-package Decision 10). Decision 10's own fallback clause applies: Claude's estimate, stored and echoed flagged as an estimate. Set engine to 'snapcalorie' and place a key to re-enable GOTK-156."
   },
+  "kroger": {
+    "_note": "The app's ONLY external access, granted by build-package Decision 8 (change control 2026-09-26). Three public Kroger endpoints: Locations, Products search, and Cart ADD. Add-only by API design — there is no cart read, no removal and no checkout to call. Invoked only when the owner explicitly asks; never scheduled, never proactive. Setting enabled to false switches the whole handoff off and the shopping list stays a plain list.",
+    "enabled": true,
+    "_locationId": "The owner's King Soopers — Havana and Mississippi, 1155 S Havana St, Aurora CO 80012 (owner's choice, 2026-09-26). Re-find with: node bin/kroger-locations.js [zip]. If this is unset the handoff fails closed to the plain list rather than guessing a shop.",
+    "locationId": "62000030",
+    "zip": "80010",
+    "redirectUri": "https://gotkapp.com/healthcoach/oauth/kroger/callback",
+    "modality": "PICKUP"
+  },
   "secrets": {
+    "_note": "Paths only, never values. Every file is read at point of use by lib/secrets.js and the app fails closed without it.",
     "anthropicKeyPath": "/root/gotk/scripts/anthropic_api_key.txt",
     "telegramTokenPath": "/root/gotk/scripts/telegram_bot_token.txt",
-    "telegramChatIdPath": "/root/gotk/scripts/telegram_chat_id.txt"
+    "telegramChatIdPath": "/root/gotk/scripts/telegram_chat_id.txt",
+    "krogerClientIdPath": "/root/gotk/scripts/kroger_client_id.txt",
+    "krogerClientSecretPath": "/root/gotk/scripts/kroger_client_secret.txt",
+    "_krogerRefreshTokenPath": "The one credential this app WRITES, so unlike the others it cannot live in root-only space. A bare filename resolves under dataDir (0700, service-owned, gitignored), which keeps each throwaway test instance on its own token instead of the live one.",
+    "krogerRefreshTokenPath": "kroger_refresh_token.txt"
   }
 }

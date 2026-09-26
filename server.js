@@ -35,6 +35,7 @@ const nutrition = require('./lib/nutrition');
 const foods = require('./lib/foods');
 const planner = require('./lib/planner');
 const atetoplan = require('./lib/atetoplan');
+const kroger = require('./lib/kroger');
 const telegram = require('./lib/telegram');
 
 const cfg = load();
@@ -116,6 +117,28 @@ function publicMeal(m) {
 function publicEntry(row) {
   if (row.kind === 'meal' || row.mealType) return { ...publicMeal(row), kind: 'meal' };
   return { ...row, date: localDate(row.ts, cfg.timezone) };
+}
+
+/**
+ * A plain confirmation page for the OAuth round trip, in the app's own colours.
+ * Text only, built with escaped values — the owner lands here from an external
+ * redirect, so nothing from the query string is ever interpolated into markup.
+ */
+function oauthPage(title, message) {
+  const esc = (s) =>
+    String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  return `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${esc(title)} — HealthCoach</title>
+<style>
+  body { margin:0; background:#f4ece0; color:#33291f;
+         font:16px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+         display:flex; align-items:center; justify-content:center; min-height:100vh; padding:24px; }
+  .card { background:#faf5ec; border:1px solid #e0d4c2; border-radius:4px; padding:28px 30px; max-width:480px; }
+  h1 { font:normal 22px/1.3 Georgia,"Times New Roman",serif; margin:0 0 12px; }
+  p { margin:0 0 14px; } a { color:#4f6b52; }
+</style>
+<div class="card"><h1>${esc(title)}</h1><p>${esc(message)}</p>
+<p><a href="${esc(cfg.publicUrl)}">Back to HealthCoach</a></p></div>`;
 }
 
 /** The favourites board as the page renders it: eight positions, holes and all. */
@@ -399,6 +422,67 @@ async function route(req, res, url) {
       ...out,
       plan: planner.view(store, cfg, weekStart),
       favorites: favoritesPayload(),
+    });
+  }
+
+  // --- the one-time Kroger authorisation (v3 F5, Decision 8) --------------
+  //
+  // Two routes and nothing else. /start builds the authorize URL server-side so
+  // the client id never has to be pasted into a link by hand; /callback
+  // exchanges the code and stores the refresh token. Neither route ever returns
+  // a token, a code, or a credential — the owner gets a sentence.
+
+  if (method === 'GET' && p === '/oauth/kroger/start') {
+    const url2 = kroger.authorizeUrl(cfg);
+    if (!url2) {
+      return send(res, 503, oauthPage('Kroger is not set up yet', kroger.unavailableReason(cfg)), 'text/html; charset=utf-8');
+    }
+    res.writeHead(302, { Location: url2, 'Cache-Control': 'no-store' });
+    return res.end();
+  }
+
+  if (method === 'GET' && p === '/oauth/kroger/callback') {
+    // Kroger reports a refusal in the query string; show it as a sentence
+    // rather than leaking the raw callback back to the page.
+    if (url.searchParams.get('error')) {
+      return send(
+        res,
+        400,
+        oauthPage('Not linked', 'Kroger did not approve the link. Nothing changed — your shopping list still works as it always has.'),
+        'text/html; charset=utf-8',
+      );
+    }
+    const out = await kroger.completeAuthorization(cfg, url.searchParams.get('code'), url.searchParams.get('state'));
+    if (out.error) {
+      return send(res, 400, oauthPage('Not linked', out.error), 'text/html; charset=utf-8');
+    }
+    return send(
+      res,
+      200,
+      oauthPage(
+        'Linked to Kroger',
+        'HealthCoach can now add your shopping list to your King Soopers cart when you ask it to. ' +
+          'It can only add — it cannot see your cart, change it, or check out. Close this tab and say ' +
+          '"send my list to King Soopers" in the chat.',
+      ),
+      'text/html; charset=utf-8',
+    );
+  }
+
+  // Presence and readiness, never a value — the same rule as /api/health.
+  if (method === 'GET' && p === '/api/kroger/status') {
+    const why = kroger.unavailableReason(cfg);
+    return send(res, 200, {
+      enabled: cfg.kroger.enabled !== false,
+      credentialsPresent: kroger.configured(cfg),
+      storeConfigured: Boolean(cfg.kroger.locationId),
+      linked: Boolean(kroger.readRefreshToken(cfg)),
+      ready: why === null,
+      reason: why,
+      // The whole of the granted surface, stated so it can be audited from
+      // outside the code: add-only, three endpoints, on request only.
+      grant: { addOnly: true, canReadCart: false, canCheckout: false, onRequestOnly: true },
+      authorizeFrom: `${cfg.publicUrl.replace(/\/$/, '')}/oauth/kroger/start`,
     });
   }
 
