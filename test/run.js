@@ -30,6 +30,8 @@ const dietcoach = require(path.join(ROOT, 'lib/dietcoach'));
 const foods = require(path.join(ROOT, 'lib/foods'));
 const planner = require(path.join(ROOT, 'lib/planner'));
 const atetoplan = require(path.join(ROOT, 'lib/atetoplan'));
+const kroger = require(path.join(ROOT, 'lib/kroger'));
+const configLoader = require(path.join(ROOT, 'lib/config'));
 const coach = require(path.join(ROOT, 'lib/coach'));
 const stretch = require(path.join(ROOT, 'lib/stretch'));
 const workouts = require(path.join(ROOT, 'lib/workouts'));
@@ -51,6 +53,7 @@ const RATIFIED_TOOLS = [
   'log_weight',
   'log_workout',
   'save_goals',
+  'send_list_to_kroger',
 ];
 
 const failures = [];
@@ -302,10 +305,21 @@ async function toolTests() {
     }
   });
 
-  await test('no tool reaches outside the app', () => {
+  await test('exactly ONE tool reaches outside the app, and it is the granted one', () => {
+    // Until v3 F5 this test asserted that NO tool reached outside. That claim is
+    // no longer true, and a green test that quietly stopped meaning what it says
+    // is the most dangerous kind, so it now states the real boundary: Decision 8
+    // grants the Kroger cart handoff and nothing else. A second outbound tool
+    // fails this and goes back to the owner.
+    const EXTERNAL = ['send_list_to_kroger'];
+    const names = coach.allTools().map((t) => t.name);
+    const outward = names.filter((n) => /kroger|instacart|walmart|amazon|http|fetch|url|api|web|order|shop/i.test(n));
+    assert.deepStrictEqual(outward.sort(), EXTERNAL.slice().sort(), 'the outbound tool surface is exactly Decision 8');
+
+    // Every other tool is still store-only, on the original rule.
     const forbidden = /\b(file|path|read_file|write_file|exec|shell|bash|command|http|fetch|url|calendar|email)\b/i;
-    for (const t of coach.allTools()) {
-      assert.ok(!forbidden.test(t.name), `tool name ${t.name} looks like external access`);
+    for (const n of names.filter((x) => !EXTERNAL.includes(x))) {
+      assert.ok(!forbidden.test(n), `tool name ${n} looks like external access`);
     }
   });
 
@@ -831,6 +845,9 @@ async function ateToPlanTests() {
 
 async function planIntegrationTests() {
   const at = (iso) => new Date(iso);
+  // A fixed Wednesday midday UTC: a weekday in every timezone this suite uses,
+  // so no test here depends on what day it happens to be run.
+  const WED_1230 = new Date('2026-09-23T12:30:00Z');
 
   /** A store whose CURRENT week has a plan, relative to a given "now". */
   function plannedWeek(now) {
@@ -892,10 +909,13 @@ async function planIntegrationTests() {
   });
 
   await test('the shopping list is told to build from the grid when one exists', () => {
-    const now = new Date();
+    // Pinned to a known Wednesday. Written against new Date() this passed for
+    // four days and then failed the moment the suite ran late on a Saturday —
+    // in CFG's Europe/London it was already Sunday, so the fixture planned
+    // nothing and the block came back empty. Simulated dates, simulated clock.
+    const now = WED_1230;
     const { s } = plannedWeek(now);
-    const block = dietcoach.weekPlanBlock(s, CFG);
-    if (planner.isSunday(localDate(now, CFG.timezone))) return; // nothing planned today
+    const block = dietcoach.weekPlanBlock(s, CFG, now);
     assert.ok(/SHOPPING LIST/i.test(block), block.slice(0, 140));
     assert.ok(/build it from THIS grid/i.test(block), 'the grid must win over history');
     assert.ok(/Do not draft from their history while a plan exists/i.test(block));
@@ -909,9 +929,9 @@ async function planIntegrationTests() {
   });
 
   await test('the week block is Monday to Saturday and never names Sunday as a day to plan', () => {
-    const now = new Date();
+    const now = WED_1230;
     const { s } = plannedWeek(now);
-    const block = dietcoach.weekPlanBlock(s, CFG);
+    const block = dietcoach.weekPlanBlock(s, CFG, now);
     for (const day of ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']) {
       assert.ok(block.includes(day), `${day} must be in the week block`);
     }
@@ -920,9 +940,9 @@ async function planIntegrationTests() {
   });
 
   await test('an unplanned day in the grid is not framed as a gap to fill', () => {
-    const now = new Date();
+    const now = WED_1230;
     const { s } = plannedWeek(now);
-    const block = dietcoach.weekPlanBlock(s, CFG);
+    const block = dietcoach.weekPlanBlock(s, CFG, now);
     if (/nothing planned/i.test(block)) {
       assert.ok(/not a gap to fill/i.test(block), 'empty days must be stated, never mourned');
     }
@@ -934,6 +954,340 @@ async function planIntegrationTests() {
     const p = dietcoach.persona(s);
     assert.ok(/Return the whole recipe rewritten/i.test(p));
     assert.ok(/recognisably itself/i.test(p));
+  });
+}
+
+// ---------------------------------------------------------------------------
+// the Kroger cart handoff (v3 F5, GOTK-168) — the app's only external access
+// ---------------------------------------------------------------------------
+
+async function krogerTests() {
+  /**
+   * A config whose Kroger credentials point wherever we say. Nothing in this
+   * section ever calls Kroger: every test here is about the boundary — what can
+   * leave, what fails closed, and what the grant does NOT include.
+   */
+  function kcfg(over = {}) {
+    const dir = tmpDir();
+    return {
+      ...CFG,
+      dataDir: dir,
+      publicUrl: 'https://gotkapp.com/healthcoach/',
+      kroger: {
+        enabled: true,
+        locationId: '62000030',
+        zip: '80010',
+        redirectUri: 'https://gotkapp.com/healthcoach/oauth/kroger/callback',
+        modality: 'PICKUP',
+        ...(over.kroger || {}),
+      },
+      secrets: {
+        ...CFG.secrets,
+        krogerClientIdPath: over.idPath !== undefined ? over.idPath : writeTmp(dir, 'id.txt', 'test-client-id'),
+        krogerClientSecretPath:
+          over.secretPath !== undefined ? over.secretPath : writeTmp(dir, 'secret.txt', 'test-client-secret'),
+        krogerRefreshTokenPath: path.join(dir, 'kroger_refresh_token.txt'),
+      },
+    };
+  }
+  function writeTmp(dir, name, body) {
+    const p = path.join(dir, name);
+    fs.writeFileSync(p, body, { mode: 0o600 });
+    return p;
+  }
+
+  // --- the grant's shape -----------------------------------------------------
+
+  await test('the granted surface is exactly three Kroger endpoints plus OAuth', () => {
+    // Decision 8 named Locations, Products and Cart-add. The endpoint table is
+    // hard-coded so the grant cannot widen by string-building a new path.
+    assert.deepStrictEqual(Object.keys(kroger.ENDPOINTS).sort(), [
+      'authorize', 'cartAdd', 'locations', 'products', 'token',
+    ]);
+    for (const url of Object.values(kroger.ENDPOINTS)) {
+      assert.ok(url.startsWith('https://api.kroger.com/v1'), `${url} must be Kroger's public API over TLS`);
+    }
+    assert.strictEqual(kroger.ENDPOINTS.cartAdd, 'https://api.kroger.com/v1/cart/add');
+  });
+
+  await test('there is no way to read, empty or check out the cart', () => {
+    // Add-only is structural: no such function exists to call. If someone adds
+    // one, this fails before it can ship.
+    for (const name of Object.keys(kroger)) {
+      assert.ok(
+        !/(getCart|readCart|removeFrom|deleteFrom|clearCart|emptyCart|checkout|placeOrder|pay)/i.test(name),
+        `kroger.${name} would exceed the add-only grant`,
+      );
+    }
+    const src = fs.readFileSync(path.join(ROOT, 'lib/kroger.js'), 'utf8');
+    assert.ok(!/cart\/(?!add)/.test(src), 'no cart path other than /cart/add may appear in the module');
+    // Check URL-shaped strings only: the prose in this file discusses checkout
+    // precisely to explain that it is impossible, and must stay allowed to.
+    const urls = src.match(/https?:\/\/[^'"`\s]+/g) || [];
+    for (const u of urls) {
+      assert.ok(!/(checkout|orders|basket|profile)/i.test(u), `${u} is outside the granted surface`);
+    }
+  });
+
+  await test('the cart scope is write-only and separate from the product scope', () => {
+    assert.strictEqual(kroger.SCOPE_CART, 'cart.basic:write');
+    assert.strictEqual(kroger.SCOPE_PRODUCT, 'product.compact');
+    assert.ok(!/read/i.test(kroger.SCOPE_CART), 'the app never asks Kroger for permission to read the cart');
+  });
+
+  // --- what may leave the box ------------------------------------------------
+
+  await test('only short grocery phrases can become an outbound search term', () => {
+    assert.strictEqual(kroger.outboundTerm('porridge oats'), 'porridge oats');
+    assert.strictEqual(kroger.outboundTerm('  salmon   fillets  '), 'salmon fillets');
+    assert.strictEqual(kroger.outboundTerm(''), null);
+    assert.strictEqual(kroger.outboundTerm(null), null);
+    assert.strictEqual(kroger.outboundTerm('a'.repeat(61)), null, 'paragraph-shaped values are not grocery lines');
+    assert.strictEqual(kroger.outboundTerm('oats\nweight 212lb'), null, 'a newline means prose has wandered in');
+    assert.strictEqual(kroger.outboundTerm('oats\u0000\u0007'), 'oats', 'control characters are stripped');
+    // A length cap alone is not a guard: the owner's goals summary is an
+    // ordinary 56-character sentence that would sail through one. Prose is
+    // rejected on its shape as well as its size.
+    assert.strictEqual(kroger.outboundTerm('Lose weight before the wedding in June; keep protein up.'), null);
+    assert.strictEqual(kroger.outboundTerm('I am trying to cut back on carbs'), null);
+    // The planner's own day line is the most plausible thing to be handed in
+    // here by mistake, and it is structure rather than a shelf item.
+    assert.strictEqual(kroger.outboundTerm('Breakfast: Porridge \u00b7 Lunch: Soup'), null);
+    // ...and none of that may cost us a real grocery line.
+    for (const ok of ['porridge oats', 'Tinned chopped tomatoes', 'Simple Truth rolled oats 18 oz',
+                      '2% milk 1 gal', 'free-range eggs, dozen', 'Beef mince']) {
+      assert.strictEqual(kroger.outboundTerm(ok), ok, `${ok} is a real grocery line and must pass`);
+    }
+  });
+
+  await test('nothing from the health store can be smuggled into a Kroger request', () => {
+    // Decision 8: grocery line items only. The realistic leak is a meal
+    // description or a goals summary being passed as an "item", so the
+    // chokepoint is tested with the actual shapes this app stores.
+    const s = new Store(tmpDir()).load();
+    s.setGoals({ summary: 'Lose weight before the wedding in June; keep protein up.', targets: { calories_kcal_per_day: 2100 } });
+    s.addMeal({ description: 'Leftover lasagne and two glasses of red, eaten late and not proud of it', nutrition: {} });
+    s.addWeight({ lb: 212 });
+
+    const leaks = [
+      s.getGoals().summary,
+      s.recentMeals(1)[0].description,
+      `weight ${s.recentWeights(1)[0].lb}lb`,
+      JSON.stringify(s.getGoals()),
+    ];
+    for (const leak of leaks) {
+      const out = kroger.outboundTerm(leak);
+      assert.ok(out === null || out.length <= 60, `health data must not become a search term: ${String(leak).slice(0, 40)}`);
+    }
+    // The long-form ones must be rejected outright, not merely truncated.
+    assert.strictEqual(kroger.outboundTerm(s.getGoals().summary), null);
+    assert.strictEqual(kroger.outboundTerm(s.recentMeals(1)[0].description), null);
+  });
+
+  // --- fail closed -----------------------------------------------------------
+
+  await test('with credentials absent it fails closed and says so without naming a path', async () => {
+    const cfg = kcfg({ idPath: '/nonexistent/id.txt', secretPath: '/nonexistent/secret.txt' });
+    assert.strictEqual(kroger.configured(cfg), false);
+    const why = kroger.unavailableReason(cfg);
+    assert.ok(why, 'there must be a reason');
+    assert.ok(!/nonexistent|\/root|\.txt/.test(why), `the reason must not name a path: ${why}`);
+
+    const out = await kroger.sendList(cfg, [{ name: 'porridge oats', quantity: 1 }]);
+    assert.ok(out.error, 'it must not pretend to have sent anything');
+    assert.ok(!out.added, 'and must report nothing added');
+  });
+
+  await test('with no store configured it fails closed rather than guessing a shop', async () => {
+    const cfg = kcfg({ kroger: { locationId: null } });
+    const out = await kroger.sendList(cfg, [{ name: 'porridge oats' }]);
+    assert.ok(out.error);
+    assert.ok(/store/i.test(out.error), out.error);
+  });
+
+  await test('unlinked, it asks to be linked rather than failing obscurely', async () => {
+    const cfg = kcfg(); // credentials present, but no refresh token on disk
+    assert.strictEqual(kroger.readRefreshToken(cfg), null);
+    const out = await kroger.sendList(cfg, [{ name: 'porridge oats' }]);
+    assert.ok(/not linked/i.test(out.error), out.error);
+  });
+
+  await test('switched off in config, the handoff is simply unavailable', async () => {
+    const cfg = kcfg({ kroger: { enabled: false } });
+    const out = await kroger.sendList(cfg, [{ name: 'oats' }]);
+    assert.ok(out.error);
+    assert.ok(!out.added);
+  });
+
+  await test('the tool hands back the plain list when the handoff fails', async () => {
+    const cfg = kcfg({ idPath: '/nonexistent/id.txt', secretPath: '/nonexistent/secret.txt' });
+    const s = new Store(tmpDir()).load();
+    const out = await dietcoach.runTool(s, cfg, 'send_list_to_kroger', {
+      items: [{ name: 'porridge oats', quantity: 2 }, { name: 'salmon fillets' }],
+    });
+    assert.ok(out.krogerFailedClosed, 'the failure must be visible to the caller');
+    assert.ok(/porridge oats/.test(out.result), 'the plain list must come back');
+    assert.ok(/salmon fillets/.test(out.result));
+    assert.ok(/Nothing was sent/i.test(out.result), out.result.slice(0, 120));
+    assert.strictEqual(s.data.meals.length, 0, 'and a shop order is not a food log entry');
+  });
+
+  await test('an empty list is refused before any network call', async () => {
+    const out = await dietcoach.runTool(new Store(tmpDir()).load(), kcfg(), 'send_list_to_kroger', { items: [] });
+    assert.ok(/nothing on the list/i.test(out.result), out.result);
+  });
+
+  // --- credentials are used, never shown ------------------------------------
+
+  await test('scrub removes both client halves and any bearer header', () => {
+    const cfg = kcfg();
+    const dirty = 'failed for Basic dGVzdDp0ZXN0 with test-client-id / test-client-secret and Bearer abc.def-123';
+    const clean = kroger.scrub(dirty, cfg);
+    assert.ok(!clean.includes('test-client-id'));
+    assert.ok(!clean.includes('test-client-secret'));
+    assert.ok(!/Bearer abc/.test(clean), clean);
+    assert.ok(!/Basic dGVzdDp0ZXN0/.test(clean), clean);
+  });
+
+  await test('the refresh token is written 0600 in the data dir, never the repo', () => {
+    const cfg = kcfg();
+    assert.ok(kroger.writeRefreshToken(cfg, 'rt-secret-value'));
+    const p = kroger.refreshTokenPath(cfg);
+    assert.strictEqual(kroger.readRefreshToken(cfg), 'rt-secret-value');
+    assert.strictEqual(fs.statSync(p).mode & 0o777, 0o600, 'owner-only');
+    assert.ok(p.startsWith(cfg.dataDir), 'it lives with the app state, not in root-only space');
+    assert.ok(!p.includes(path.join(ROOT, 'lib')) && !/healthcoach\/(lib|public|bin|test)\//.test(p),
+      'and never inside the repo tree');
+    // And it is scrubbed out of anything outward-facing.
+    assert.ok(!kroger.scrub('token was rt-secret-value', cfg).includes('rt-secret-value'));
+  });
+
+  await test('a bare refresh-token filename resolves under the data dir', () => {
+    // So a throwaway test instance with its own HEALTHCOACH_DATA_DIR can never
+    // read or clobber the live Kroger link.
+    const a = configLoader.load();
+    assert.ok(a.secrets.krogerRefreshTokenPath.startsWith(a.dataDir), a.secrets.krogerRefreshTokenPath);
+  });
+
+  await test('clearing the link removes the token', () => {
+    const cfg = kcfg();
+    kroger.writeRefreshToken(cfg, 'rt');
+    assert.ok(kroger.clearRefreshToken(cfg));
+    assert.strictEqual(kroger.readRefreshToken(cfg), null);
+  });
+
+  // --- the one-time authorisation -------------------------------------------
+
+  await test('the authorize URL asks only for cart-write, and carries a fresh state', () => {
+    const cfg = kcfg();
+    const u = new URL(kroger.authorizeUrl(cfg));
+    assert.strictEqual(u.origin + u.pathname, kroger.ENDPOINTS.authorize);
+    assert.strictEqual(u.searchParams.get('scope'), 'cart.basic:write');
+    assert.strictEqual(u.searchParams.get('response_type'), 'code');
+    assert.strictEqual(u.searchParams.get('redirect_uri'), cfg.kroger.redirectUri);
+    assert.ok((u.searchParams.get('state') || '').length >= 32, 'a guessable state is no state');
+    const second = new URL(kroger.authorizeUrl(cfg)).searchParams.get('state');
+    assert.notStrictEqual(u.searchParams.get('state'), second, 'each link gets its own state');
+  });
+
+  await test('without credentials there is no authorize URL to hand out', () => {
+    assert.strictEqual(kroger.authorizeUrl(kcfg({ idPath: '/nonexistent', secretPath: '/nonexistent' })), null);
+  });
+
+  await test('a callback with an unknown or reused state is refused', async () => {
+    const cfg = kcfg();
+    const state = new URL(kroger.authorizeUrl(cfg)).searchParams.get('state');
+    assert.strictEqual(kroger.consumeState('never-issued'), false);
+    assert.strictEqual(kroger.consumeState(state), true, 'a freshly issued state is accepted once');
+    assert.strictEqual(kroger.consumeState(state), false, 'and never a second time');
+
+    const out = await kroger.completeAuthorization(cfg, 'some-code', 'forged-state');
+    assert.ok(/expired|again/i.test(out.error), out.error);
+    assert.strictEqual(kroger.readRefreshToken(cfg), null, 'a refused callback links nothing');
+  });
+
+  // --- the echo --------------------------------------------------------------
+
+  await test('the echo names every added item with size and quantity', () => {
+    const text = kroger.echo({
+      added: [
+        { brand: 'Simple Truth', description: 'Rolled Oats', size: '18 oz', quantity: 2, requested: 'porridge oats' },
+        { brand: null, description: 'Atlantic Salmon Fillet', size: '1 lb', quantity: 3, requested: 'salmon fillets' },
+      ],
+      unmatched: [{ name: 'the good yoghurt', why: 'no match' }],
+      storeId: '62000030',
+    });
+    assert.ok(/Simple Truth Rolled Oats, 18 oz x2/.test(text), text);
+    assert.ok(/Atlantic Salmon Fillet, 1 lb x3/.test(text), text);
+    assert.ok(/the good yoghurt/.test(text), 'unmatched lines come back for manual shopping');
+    assert.ok(/cannot change or remove/i.test(text), 'and the add-only limit is stated where it matters');
+  });
+
+  await test('when nothing matches, nothing is claimed and the list comes back', () => {
+    const text = kroger.echo({ nothingMatched: true, added: [], unmatched: [{ name: 'quince paste' }] });
+    assert.ok(/nothing was added/i.test(text), text);
+    assert.ok(/quince paste/.test(text));
+  });
+
+  await test('the echo never contains a credential-shaped value', () => {
+    const cfg = kcfg();
+    kroger.writeRefreshToken(cfg, 'rt-secret-value');
+    const text = kroger.echo({ added: [{ description: 'Oats', size: '1 lb', quantity: 1 }], unmatched: [], storeId: '1' });
+    assert.ok(!text.includes('rt-secret-value'));
+    assert.ok(!/Bearer|Basic |client_secret/i.test(text));
+  });
+
+  // --- on request only -------------------------------------------------------
+
+  await test('the briefing cannot reach Kroger — it runs with no tools at all', () => {
+    // The one unprompted message of the day must not be able to spend money or
+    // touch a cart. briefing.compose() passes no tools to the model, so the
+    // guarantee is structural rather than a matter of prompt wording.
+    const src = fs.readFileSync(path.join(ROOT, 'lib/briefing.js'), 'utf8');
+    assert.ok(!/require\(['"]\.\/kroger['"]\)/.test(src), 'the briefing must not even import the client');
+    assert.ok(!/tools\s*[:,]/.test(src.split('claude.complete')[1] || ''), 'and must pass no tools');
+  });
+
+  await test('the coach is told to send only when asked, and only groceries', () => {
+    const p = dietcoach.persona(new Store(tmpDir()).load());
+    assert.ok(/Only when they ASK/i.test(p), 'owner-request-only must be in the prompt');
+    assert.ok(/cannot see the cart/i.test(p), 'and the add-only limit');
+    assert.ok(/Nothing about their weight, their goals, their log or their health/i.test(p));
+    const tool = coach.allTools().find((t) => t.name === 'send_list_to_kroger');
+    assert.ok(/ONLY WHEN THEY EXPLICITLY ASK/.test(tool.description), 'and in the tool description');
+    assert.ok(/Never pass meal descriptions, goals, weights/.test(tool.description));
+  });
+
+  await test('the coach is told where linking actually happens, and not to invent it', () => {
+    // Without this the model made up a remedy: asked to send a list before the
+    // account was linked, it told the owner to look in "the Kroger account
+    // settings", which is not where this lives. Observed on a throwaway
+    // instance before the block existed.
+    const cfg = kcfg();
+    const block = dietcoach.krogerBlock(cfg);
+    assert.ok(/not usable right now/i.test(block), block);
+    assert.ok(block.includes('/oauth/kroger/start'), 'the real linking path must be in the prompt');
+    assert.ok(/do not tell them to look in their Kroger account settings/i.test(block));
+    // Presence, never values.
+    assert.ok(!block.includes('test-client-id') && !block.includes('test-client-secret'));
+  });
+
+  await test('once linked the block says so, without leaking anything', () => {
+    const cfg = kcfg();
+    kroger.writeRefreshToken(cfg, 'rt-secret-value');
+    const block = dietcoach.krogerBlock(cfg);
+    assert.ok(/connected and ready/i.test(block), block);
+    assert.ok(/only when — they ask/i.test(block), 'owner-request-only survives being connected');
+    assert.ok(!block.includes('rt-secret-value'));
+  });
+
+  await test('the handoff writes nothing to the health store', () => {
+    // A shop order is not a food log entry. Decision 1 still holds: only the
+    // owner saying "ate to plan" or describing a meal writes to `meals`.
+    const src = fs.readFileSync(path.join(ROOT, 'lib/kroger.js'), 'utf8');
+    for (const writer of ['addMeal', 'updateMeal', 'addWorkout', 'addWeight', 'setGoals', 'addFood', 'addMessage']) {
+      assert.ok(!src.includes(writer), `kroger.js must not call store.${writer}`);
+    }
   });
 }
 
@@ -1759,6 +2113,7 @@ async function main() {
   await plannerTests();
   await ateToPlanTests();
   await planIntegrationTests();
+  await krogerTests();
   await stretchTests();
   await movementTests();
   await weightTests();
