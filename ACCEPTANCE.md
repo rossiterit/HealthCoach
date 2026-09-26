@@ -1,8 +1,113 @@
 # HealthCoach v3 — acceptance note
 
-**Date:** 2026-09-23 · **Epic:** GOTK-163 (Meal Planner release) · **Built by:** Claude Code, on the GOTK droplet
+**Date:** 2026-09-23, amended 2026-09-26 · **Epic:** GOTK-163 (Meal Planner release) · **Built by:** Claude Code, on the GOTK droplet
 
 *(v2's note is in git history at `a3ed59b`; v1's at `08215b4`.)*
+
+---
+
+# Amendment, 2026-09-26 — GOTK-168, the King Soopers cart handoff
+
+**One thing needs you before this works, and it takes about a minute.**
+
+## Link your Kroger account — do this once
+
+**<https://gotkapp.com/healthcoach/oauth/kroger/start>**
+
+Open that, sign in to Kroger, and approve it. You'll land back on a page that
+says **"Linked to Kroger"**. Two things to expect: your browser may ask for the
+usual HealthCoach password on the way back, and the approval screen will say
+HealthCoach wants to *add to your cart* — that's the only permission it asks
+for, and it's the only one it has.
+
+Then **hard-reload the app (Ctrl+Shift+R)** and try the test phrase:
+
+> **"Send my list to King Soopers"**
+
+Ask it for a shopping list first, then say that. It should add what it matched,
+name every item back to you with size and quantity, and tell you what it
+couldn't find.
+
+## What it can and can't do
+
+It can **add to your cart. That is all.** It cannot see what's in your cart,
+can't change or remove anything, and can't check out — Kroger's public API has
+no such thing, so this isn't a promise, it's just not built and couldn't be.
+**You always finish the order yourself in the Kroger app.**
+
+It only goes near your cart **when you ask it to.** It won't send a list because
+it just wrote one, it won't do it on a schedule, and the morning briefing
+physically can't — that message runs with no tools at all.
+
+Only **groceries** leave the box. Not your weight, not your goals, not your food
+log, not a word of the conversation. There's one chokepoint every search term
+goes through, and it throws out anything sentence-shaped. I found that mattered:
+my first version only capped the length, and your goals summary is an ordinary
+56-character sentence that went straight through it. It doesn't now.
+
+**If anything goes wrong you get the plain list**, every time — a missing
+credential, an expired link, Kroger having a bad day. The list has always worked
+and still does; the cart is a convenience sitting on top of it.
+
+## Your store
+
+**King Soopers, Havana and Mississippi** — 1155 S Havana St, Aurora. That's the
+one you picked. To change it: `node bin/kroger-locations.js 80010` lists the
+others with their ids, and it goes in `config.json` under `kroger.locationId`.
+
+## Say it the American way
+
+Worth knowing, because it's the one thing that'll make it look broken when it
+isn't. I tested against your real store: **"porridge oats" matched nothing.
+"Tinned chopped tomatoes" matched nothing.** "Oatmeal" and "canned diced
+tomatoes" both matched first time. It's a Colorado supermarket. I've told the
+coach to write lists in American shelf names, but if something comes back
+unmatched and you think it shouldn't have, that's the first thing to check.
+
+## What I verified, and what I couldn't
+
+Verified for real against Kroger with your credentials: the store lookup, and
+product matching at your store — salmon fillets, green beans, greek yoghurt,
+oatmeal and canned diced tomatoes all matched real products with real UPCs and
+sizes. Verified the whole fail-closed path by pointing the app at credentials
+that don't exist and asking it to send a list: it handed back the plain list and
+claimed nothing.
+
+**I could not test the cart add itself.** It needs your one-time authorization,
+which is yours to give and can't be faked from here — that's by design in the
+spec, not a gap I left. The first real add is your click-through. If the echo
+lists something odd, tell me and I'll look.
+
+## One thing I fixed that you'd have hit
+
+Asked to send a list before the account was linked, the coach made something up
+— it told me to go and find it in "the Kroger account settings", which isn't
+where it lives. It now carries the real link and is told not to invent a fix.
+You'd have gone looking in the wrong place.
+
+## Two notes on the setup
+
+- **The credentials were unreadable at first.** You'd put them in as `root:root`
+  600, and the service runs as `tony`, so it couldn't open either file. You
+  fixed it while I was building — they're `tony:tony` now, matching how the
+  Anthropic and Telegram secrets already live there. Nothing to do.
+- **The refresh token lives in `data/`, not `/root/`.** It's the one credential
+  this app *writes*, so it can't sit in root-only space. `data/` is 0700, owned
+  by the service, and gitignored. Side benefit: test instances get their own, so
+  they can never clobber your real link.
+
+## Governance
+
+Ninth tool, and the app's **first and only external access**, on the grant in
+Decision 8. The test that used to assert *"no tool reaches outside the app"* was
+true right up until this release — I rewrote it rather than let it keep passing
+while quietly meaning nothing. It now asserts the actual boundary: the outbound
+surface is exactly the Kroger handoff, and every other tool is still store-only.
+A second one fails the build.
+
+177 tests green. PR [#5](https://github.com/rossiterit/HealthCoach/pull/5).
+
+---
 
 ## Read this first
 
