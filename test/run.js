@@ -34,6 +34,7 @@ const kroger = require(path.join(ROOT, 'lib/kroger'));
 const recipes = require(path.join(ROOT, 'lib/recipes'));
 const fetcher = require(path.join(ROOT, 'lib/fetcher'));
 const recipeimport = require(path.join(ROOT, 'lib/recipeimport'));
+const recipebuilder = require(path.join(ROOT, 'lib/recipebuilder'));
 const configLoader = require(path.join(ROOT, 'lib/config'));
 const coach = require(path.join(ROOT, 'lib/coach'));
 const stretch = require(path.join(ROOT, 'lib/stretch'));
@@ -2058,6 +2059,115 @@ async function urlImportTests() {
 }
 
 // ---------------------------------------------------------------------------
+// the coach recipe builder — seven modes (v5 F1, GOTK-176)
+// ---------------------------------------------------------------------------
+
+async function recipeBuilderTests() {
+  await test('exactly the seven locked modes, in the specced order', () => {
+    assert.deepStrictEqual(recipebuilder.MODE_IDS, [
+      'low-calorie', 'high-protein', 'low-carb', 'portion-controlled', 'balanced', 'quick', 'treat',
+    ]);
+    // Decision 2 locks these. An eighth is a change-control matter, not a patch.
+    assert.strictEqual(recipebuilder.MODES.length, 7);
+    for (const m of recipebuilder.modeList()) {
+      assert.ok(m.id && m.label && m.blurb, `${m.id} needs a label and a blurb for the chip`);
+    }
+  });
+
+  await test('each mode carries its own distinct instruction', () => {
+    const guidance = recipebuilder.MODES.map((m) => m.guidance);
+    assert.strictEqual(new Set(guidance).size, 7, 'no two modes may share a brief');
+    assert.ok(/thirty minutes|30 minutes/i.test(recipebuilder.byId('quick').guidance));
+    assert.ok(/cauliflower|starch/i.test(recipebuilder.byId('low-carb').guidance));
+    assert.ok(/per-serving|portion/i.test(recipebuilder.byId('portion-controlled').guidance));
+  });
+
+  await test('TREAT mode is told, in capitals, to say nothing about nutrition', () => {
+    const g = recipebuilder.byId('treat').guidance;
+    assert.ok(/NO NUTRITION COMMENTARY/i.test(g));
+    assert.ok(/Do not lighten anything/i.test(g));
+    assert.ok(/in moderation/i.test(g), 'the soft register is named too');
+    assert.ok(/real thing/i.test(g));
+  });
+
+  await test('the treat guard catches nutrition talk and leaves cooking talk alone', () => {
+    // This list was wrong on its first pass: it flagged "low heat", "reduce the
+    // sauce" and "a lighter batter" — ordinary cooking craft — and failed four
+    // perfectly good treat recipes. A guard that fires on correct output gets
+    // deleted by the next person who hits it, so it is anchored to nutrients.
+    const cooking = [
+      'Keep the sausages on a low heat from the start.',
+      'Reduce the sauce until it coats the back of a spoon.',
+      'A lighter batter runs off; whisk in another spoonful of flour.',
+      'Beat on low speed so the cheesecake does not crack.',
+      'Cook over a low flame, reducing by half.',
+    ];
+    for (const t of cooking) {
+      assert.deepStrictEqual(recipebuilder.treatViolations({ name: 'x', steps: [t] }), [],
+        `cooking language must pass: ${t}`);
+    }
+    const commentary = [
+      'This comes in around 800 calories a slice.',
+      'You could use a low-fat spread instead.',
+      'A lighter version would use yogurt.',
+      'Indulgent, but worth it in moderation.',
+      'Swap the cream for a healthier alternative.',
+      'Treat yourself — every now and then is fine.',
+      'If you wanted to cut the fat, use less butter.',
+    ];
+    for (const t of commentary) {
+      assert.ok(recipebuilder.treatViolations({ name: 'x', steps: [t] }).length > 0,
+        `nutrition commentary must be caught: ${t}`);
+    }
+  });
+
+  await test('the guard reads the name and notes, not just the steps', () => {
+    assert.ok(recipebuilder.treatViolations({ name: 'Guilt-free brownies', steps: [] }).length);
+    assert.ok(recipebuilder.treatViolations({ name: 'Brownies', notes: 'Only 200 calories each.', steps: [] }).length);
+  });
+
+  await test('generation reaches nothing outside the app', () => {
+    // Decision: from the coach's own knowledge, no lookups. The module cannot
+    // require anything that can fetch, and a test says so rather than trusting
+    // that nobody adds one later.
+    const src = fs.readFileSync(path.join(ROOT, 'lib/recipebuilder.js'), 'utf8');
+    for (const forbidden of ['fetcher', 'recipeimport', 'kroger', 'http', 'https', 'net', 'dns']) {
+      assert.ok(!new RegExp(`require\\(['"]\\.?\\.?/?${forbidden}['"]\\)`).test(src),
+        `recipebuilder must not require ${forbidden}`);
+    }
+    assert.ok(!/fetch\(/.test(src), 'and must not call fetch');
+  });
+
+  await test('an unknown mode or an empty dish is refused before any model call', async () => {
+    assert.ok((await recipebuilder.generate(CFG, { dish: 'chilli', mode: 'keto-extreme' })).error);
+    assert.ok((await recipebuilder.generate(CFG, { dish: '   ', mode: 'balanced' })).error);
+  });
+
+  await test('the coach is told the seven modes, and what Treat means', () => {
+    // Chat parity (Decision 1): the same ask phrased in chat must reach the
+    // same seven behaviours, through the existing save_recipe pipeline. No new
+    // tool is added for this — v5 limits new tools to plan plumbing.
+    const p = dietcoach.persona(new Store(tmpDir()).load());
+    for (const label of ['LOW CALORIE', 'HIGH PROTEIN', 'LOW CARB', 'PORTION CONTROLLED', 'BALANCED', 'QUICK', 'TREAT']) {
+      assert.ok(p.includes(label), `the persona must name ${label}`);
+    }
+    assert.ok(/NOT ONE WORD ABOUT NUTRITION/i.test(p), 'Treat mode must be unmistakable in the prompt');
+    assert.ok(/cannot look a recipe up/i.test(p), 'and generation must be from its own knowledge');
+    assert.ok(!coach.allTools().some((t) => /build|generate|mode/i.test(t.name)),
+      'the builder adds no tool: chat parity runs through save_recipe');
+  });
+
+  await test('the page offers the modes as chips with nothing pre-selected', () => {
+    const page = fs.readFileSync(path.join(ROOT, 'public/index.html'), 'utf8');
+    assert.ok(/Build with Coach/.test(page));
+    assert.ok(/rc\.build\.mode = rc\.build\.mode === m\.id \? null : m\.id/.test(page),
+      'one mode at a time, and tapping it again clears it');
+    assert.ok(/mode: null/.test(page), 'no mode is selected by default');
+    assert.ok(/role', 'radiogroup'|radiogroup/.test(page), 'the chips are a radio group for a screen reader');
+  });
+}
+
+// ---------------------------------------------------------------------------
 // the stretch routine (GOTK-159)
 // ---------------------------------------------------------------------------
 
@@ -2930,6 +3040,7 @@ async function main() {
   await krogerTests();
   await recipeTests();
   await urlImportTests();
+  await recipeBuilderTests();
   await stretchTests();
   await movementTests();
   await weightTests();

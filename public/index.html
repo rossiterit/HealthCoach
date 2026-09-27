@@ -271,6 +271,26 @@
   .rc-card .from { font-size: 11px; color: var(--ac-green); }
   .rc-empty { color: var(--muted); font-size: 13px; padding: 18px 0; }
 
+  /* --- Build with Coach (v5 F1) --- */
+  .rc-build {
+    border: 1px solid var(--line); border-radius: 3px; background: var(--paper2);
+    padding: 14px; margin-bottom: 14px; display: grid; gap: 9px;
+  }
+  .rc-build-head { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
+  .rc-build-head h3 { font-family: var(--serif); font-weight: normal; font-size: 16px; margin: 0; }
+  .rc-build-head .hint { font-size: 11px; color: var(--muted); }
+  .rc-build .rc-search { margin-bottom: 0; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .chip {
+    font: inherit; font-size: 12px; padding: 6px 12px; border-radius: 16px; cursor: pointer;
+    border: 1px solid var(--line); background: var(--card); color: var(--muted);
+  }
+  .chip:hover { color: var(--ink); border-color: var(--ink); }
+  /* The chosen mode, in ink. No mode is selected by default: which way a dish
+     gets built is the owner's call, not a preference the app holds. */
+  .chip.on { background: var(--ink); color: var(--paper); border-color: var(--ink); }
+  .chip-blurb { font-size: 11px; color: var(--muted); font-style: italic; }
+
   /* --- editor --- */
   .rc-editor { display: grid; gap: 18px; }
   .rc-title {
@@ -1002,6 +1022,8 @@ function renderMovement(host, d) {
 
 const rc = {
   screen: 'list',   // 'list' | 'editor' | 'cook'
+  modes: [],        // the seven build modes, fetched once
+  build: { open: false, dish: '', mode: null, note: '', busy: false, msg: '', warn: false },
   list: [],
   query: '',
   draft: null,      // the recipe being edited, as a working copy
@@ -1030,6 +1052,9 @@ async function loadRecipes() {
   try {
     const d = await rcApi('/recipes');
     rc.list = d.recipes || [];
+    if (!rc.modes.length) {
+      try { rc.modes = (await rcApi('/recipes/modes')).modes || []; } catch { rc.modes = []; }
+    }
     if (rc.screen === 'list') renderRecipes();
   } catch (e) {
     host.textContent = '';
@@ -1052,11 +1077,16 @@ function renderList(host) {
   head.appendChild(el('h2', null, 'Recipes'));
   head.appendChild(el('span', 'count', rc.list.length ? `${rc.list.length} saved` : ''));
   const actions = el('div', 'rc-actions');
+  const build = el('button', 'rc-btn', 'Build with Coach');
+  build.addEventListener('click', () => { rc.build.open = !rc.build.open; renderRecipes(); });
+  actions.appendChild(build);
   const add = el('button', 'rc-btn primary', 'New recipe');
   add.addEventListener('click', () => startNewRecipe());
   actions.appendChild(add);
   head.appendChild(actions);
   host.appendChild(head);
+
+  if (rc.build.open) host.appendChild(builderPanel());
 
   const search = el('input', 'rc-search');
   search.placeholder = 'Search your recipes…';
@@ -1103,6 +1133,118 @@ function listCard(r) {
   card.addEventListener('click', open);
   card.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(); } });
   return card;
+}
+
+/**
+ * Build with Coach (v5 F1) — name a dish, pick one mode, get a draft.
+ *
+ * It sits beside New recipe and is closed until asked for, because the list is
+ * what the tab is for and this is a second way in, not the main event.
+ *
+ * Exactly one mode at a time (Decision 2). The chips are radio behaviour with
+ * no default selected: picking how the dish should be built is the owner's
+ * call, and pre-selecting one would be the app having a preference.
+ */
+function builderPanel() {
+  const box = el('div', 'rc-build');
+
+  const head = el('div', 'rc-build-head');
+  head.appendChild(el('h3', null, 'Build with Coach'));
+  head.appendChild(el('span', 'hint', 'Name a dish and pick how you want it made.'));
+  box.appendChild(head);
+
+  const dish = el('input', 'rc-search');
+  dish.id = 'rc-dish';
+  dish.placeholder = 'e.g. chicken katsu curry';
+  dish.setAttribute('aria-label', 'Dish to build');
+  dish.value = rc.build.dish;
+  dish.addEventListener('input', () => { rc.build.dish = dish.value; });
+  dish.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); draftWithCoach(); } });
+  box.appendChild(dish);
+
+  const chips = el('div', 'chips');
+  chips.setAttribute('role', 'radiogroup');
+  chips.setAttribute('aria-label', 'How to build it');
+  rc.modes.forEach((m) => {
+    const c = el('button', 'chip' + (rc.build.mode === m.id ? ' on' : ''));
+    c.type = 'button';
+    c.setAttribute('role', 'radio');
+    c.setAttribute('aria-checked', String(rc.build.mode === m.id));
+    c.title = m.blurb;
+    c.appendChild(el('span', 'cl', m.label));
+    c.addEventListener('click', () => {
+      // One mode at a time; tapping the chosen one clears it again.
+      rc.build.mode = rc.build.mode === m.id ? null : m.id;
+      renderRecipes();
+    });
+    chips.appendChild(c);
+  });
+  box.appendChild(chips);
+  if (rc.build.mode) {
+    const m = rc.modes.find((x) => x.id === rc.build.mode);
+    if (m) box.appendChild(el('div', 'chip-blurb', m.blurb));
+  }
+
+  const note = el('input', 'rc-search');
+  note.id = 'rc-note';
+  note.placeholder = 'Anything else? e.g. dairy-free, for 6';
+  note.setAttribute('aria-label', 'Anything else');
+  note.value = rc.build.note;
+  note.addEventListener('input', () => { rc.build.note = note.value; });
+  note.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); draftWithCoach(); } });
+  box.appendChild(note);
+
+  const foot = el('div', 'rc-foot');
+  const go = el('button', 'rc-btn primary', rc.build.busy ? 'Writing it…' : 'Draft it');
+  go.id = 'rc-draft';
+  go.disabled = rc.build.busy || !rc.build.dish.trim() || !rc.build.mode;
+  go.addEventListener('click', draftWithCoach);
+  foot.appendChild(go);
+  const cancel = el('button', 'rc-btn quiet', 'Cancel');
+  cancel.disabled = rc.build.busy;
+  cancel.addEventListener('click', () => { rc.build.open = false; renderRecipes(); });
+  foot.appendChild(cancel);
+  box.appendChild(foot);
+
+  const msg = el('div', 'rc-msg', rc.build.msg || '');
+  msg.id = 'rc-build-msg';
+  if (rc.build.warn) msg.className = 'rc-msg warn';
+  box.appendChild(msg);
+
+  return box;
+}
+
+async function draftWithCoach() {
+  const b = rc.build;
+  if (!b.dish.trim() || !b.mode || b.busy) return;
+  b.busy = true; b.warn = false;
+  b.msg = 'Writing it — this takes a few seconds.';
+  renderRecipes();
+  try {
+    const out = await rcApi('/recipes/build', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ dish: b.dish, mode: b.mode, note: b.note }),
+    });
+    // It opens in the editor as an ordinary draft — editable and deletable
+    // like any other recipe. Nothing about it is privileged for being generated.
+    rc.saved = out.recipe;
+    rc.draft = {
+      id: out.recipe.id, name: out.recipe.name, servings: out.recipe.servings,
+      prepMinutes: out.recipe.prepMinutes, cookMinutes: out.recipe.cookMinutes,
+      ingredients: out.recipe.ingredients.map((i) => ({
+        foodId: i.foodId, name: i.name, quantity: i.originalQuantity, amount: i.amount,
+      })),
+      steps: out.recipe.steps.slice(),
+    };
+    b.open = false; b.busy = false; b.dish = ''; b.note = ''; b.msg = '';
+    rc.screen = 'editor';
+    await loadRecipes();
+    renderRecipes();
+    rcMsg(`Drafted. It is yours now — change anything.${(out.created && out.created.length) ? ` Added ${out.created.map((c) => c.name).join(', ')} to your food library, estimated.` : ''}`);
+  } catch (e) {
+    b.busy = false; b.warn = true; b.msg = e.message;
+    renderRecipes();
+  }
 }
 
 // --- editor -----------------------------------------------------------------
