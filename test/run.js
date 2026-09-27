@@ -31,6 +31,7 @@ const foods = require(path.join(ROOT, 'lib/foods'));
 const planner = require(path.join(ROOT, 'lib/planner'));
 const atetoplan = require(path.join(ROOT, 'lib/atetoplan'));
 const kroger = require(path.join(ROOT, 'lib/kroger'));
+const recipes = require(path.join(ROOT, 'lib/recipes'));
 const configLoader = require(path.join(ROOT, 'lib/config'));
 const coach = require(path.join(ROOT, 'lib/coach'));
 const stretch = require(path.join(ROOT, 'lib/stretch'));
@@ -1292,6 +1293,222 @@ async function krogerTests() {
 }
 
 // ---------------------------------------------------------------------------
+// the recipe model (v4 F1, GOTK-170)
+// ---------------------------------------------------------------------------
+
+async function recipeTests() {
+  /** A store with two stocked ingredients and a four-serving porridge. */
+  function stocked() {
+    const s = new Store(tmpDir()).load();
+    const oats = s.addFood({ name: 'Porridge oats', quantity: '1 bowl (40g)', nutrition: { calories_kcal: 150, protein_g: 5, fat_g: 3, carb_g: 27, sodium_mg: 2 } });
+    const milk = s.addFood({ name: 'Semi-skimmed milk', quantity: '200 ml', nutrition: { calories_kcal: 100, protein_g: 7, fat_g: 3.5, carb_g: 10, sodium_mg: 90 } });
+    const r = s.addRecipe({
+      name: 'Big batch porridge',
+      servings: 4,
+      ingredients: [
+        { foodId: oats.id, name: 'Porridge oats', quantity: '160 g', amount: 4 },
+        { foodId: milk.id, name: 'Semi-skimmed milk', quantity: '800 ml', amount: 4 },
+      ],
+      steps: ['Bring the milk to a simmer.', 'Stir in the oats.', 'Cook 5 minutes, stirring.'],
+    });
+    return { s, oats, milk, r };
+  }
+
+  await test('a recipe stores its parts and always has at least one serving', () => {
+    const { s, r } = stocked();
+    assert.strictEqual(r.servings, 4);
+    assert.strictEqual(r.ingredients.length, 2);
+    assert.strictEqual(r.steps.length, 3);
+    // Servings is the canonical unit, so it can never be zero or absent.
+    assert.strictEqual(s.addRecipe({ name: 'x', servings: 0 }).servings, 1);
+    assert.strictEqual(s.addRecipe({ name: 'y' }).servings, 1);
+    assert.strictEqual(s.addRecipe({ name: 'z', servings: 500 }).servings, 99);
+  });
+
+  await test('totals sum the ingredients, per-serving divides by servings', () => {
+    const { s, r } = stocked();
+    const t = recipes.totals(s, r);
+    assert.strictEqual(t.nutrition.calories_kcal, 1000, '4x150 + 4x100');
+    assert.strictEqual(t.nutrition.protein_g, 48, '4x5 + 4x7');
+    const per = recipes.perServing(s, r);
+    assert.strictEqual(per.calories_kcal, 250);
+    assert.strictEqual(per.protein_g, 12);
+  });
+
+  await test('changing servings changes per-serving, not the total', () => {
+    const { s, r } = stocked();
+    const totalBefore = recipes.totals(s, r).nutrition.calories_kcal;
+    s.updateRecipe(r.id, { servings: 2 });
+    assert.strictEqual(recipes.totals(s, r).nutrition.calories_kcal, totalBefore, 'the pot is the same size');
+    assert.strictEqual(recipes.perServing(s, r).calories_kcal, 500, 'but a serving is twice as big');
+  });
+
+  await test('an ingredient not in the library counts as nothing, and says so', () => {
+    // Counting it as zero calories silently would make a partial total look
+    // like a complete one, which is the sort of quiet wrongness that matters.
+    const { s, r } = stocked();
+    s.updateRecipe(r.id, {
+      ingredients: [...r.ingredients, { name: 'Pinch of salt', quantity: '1 pinch' }],
+    });
+    const t = recipes.totals(s, s.getRecipe(r.id));
+    assert.strictEqual(t.ingredientCount, 3);
+    assert.strictEqual(t.countedCount, 2);
+    assert.strictEqual(t.complete, false, 'a total from 2 of 3 ingredients is not a total');
+    assert.strictEqual(t.nutrition.calories_kcal, 1000, 'and the unlinked row adds nothing');
+  });
+
+  await test('the amount multiplier is what the macro maths uses, not the quantity text', () => {
+    // The modelling decision the spec left open, pinned here: quantity is free
+    // text for the cook, amount is the numeric multiple of the library serving.
+    const { s, oats } = stocked();
+    const r = s.addRecipe({
+      name: 'One bowl',
+      servings: 1,
+      ingredients: [{ foodId: oats.id, name: 'Porridge oats', quantity: 'a generous scoop', amount: 2 }],
+    });
+    assert.strictEqual(recipes.perServing(s, r).calories_kcal, 300, '2 x the library serving');
+    const v = recipes.view(s, r);
+    assert.strictEqual(v.ingredients[0].quantity, 'a generous scoop', 'the text is never parsed for maths');
+    assert.ok(/2 x 1 bowl/.test(v.ingredients[0].basis), v.ingredients[0].basis);
+  });
+
+  await test('an absent or silly amount defaults to one library serving', () => {
+    assert.strictEqual(recipes.amountOf(undefined), 1);
+    assert.strictEqual(recipes.amountOf(0), 1);
+    assert.strictEqual(recipes.amountOf(-3), 1);
+    assert.strictEqual(recipes.amountOf('2.5'), 2.5);
+    assert.strictEqual(recipes.amountOf(9999), 100, 'capped rather than unbounded');
+  });
+
+  await test('correcting an ingredient reflows every recipe that uses it', () => {
+    // Computed at read time, not stored — the same rule that made a library
+    // correction reflow every plan in v3.
+    const { s, oats, r } = stocked();
+    s.updateFood(oats.id, { nutrition: { calories_kcal: 300 } });
+    assert.strictEqual(recipes.totals(s, s.getRecipe(r.id)).nutrition.calories_kcal, 1600, '4x300 + 4x100');
+  });
+
+  await test('a recipe is a library citizen: searchable, and resolvable by id', () => {
+    const { s, r } = stocked();
+    assert.strictEqual(s.libraryItems().length, 3, 'two foods and one recipe');
+    const item = s.libraryItem(r.id);
+    assert.strictEqual(item.kind, 'recipe');
+    assert.strictEqual(item.quantity, '1 serving', 'one serving is what lands in a planner slot');
+    assert.strictEqual(item.nutrition.calories_kcal, 250, 'its macros are per-serving');
+    assert.strictEqual(item.servings, 4);
+    const hit = foods.search(s, 'porridge');
+    assert.ok(hit.results.some((x) => x.id === r.id), 'a recipe must be findable by search');
+  });
+
+  await test('a recipe can be pinned to a favourite tile like any meal', () => {
+    const { s, r } = stocked();
+    const out = s.pinFavorite(r.id, 0);
+    assert.strictEqual(out.slot, 0);
+    assert.strictEqual(s.libraryItem(s.favorites()[0]).name, 'Big batch porridge');
+  });
+
+  await test('a recipe drops into a planner slot and feeds the day totals per serving', () => {
+    const { s, r } = stocked();
+    const WEEK = '2026-09-21';
+    const out = planner.assign(s, WEEK, { date: '2026-09-23', slot: 'dinner', foodId: r.id });
+    assert.ok(out.entry, out.error);
+    const wed = planner.view(s, CFG, WEEK).days.find((d) => d.date === '2026-09-23');
+    assert.strictEqual(wed.slots.find((x) => x.slot === 'dinner').cards[0].name, 'Big batch porridge');
+    assert.strictEqual(wed.totals.fields[0].value, 250, 'one serving, not the whole pot');
+  });
+
+  await test('healthifying writes a NEW recipe and never touches the original', () => {
+    // Decision 3, held in the store rather than trusted to a caller.
+    const { s, r } = stocked();
+    const copy = s.addRecipe({
+      name: 'Big batch porridge, lighter',
+      servings: 4,
+      ingredients: r.ingredients,
+      steps: r.steps,
+      healthifiedFrom: r.id,
+      healthifyNote: 'Swapped semi-skimmed for oat milk.',
+    });
+    assert.notStrictEqual(copy.id, r.id);
+    assert.strictEqual(copy.healthifiedFrom, r.id);
+    const original = s.getRecipe(r.id);
+    assert.strictEqual(original.name, 'Big batch porridge', 'the original keeps its name');
+    assert.strictEqual(original.healthifiedFrom, null, 'and carries no pointer forward');
+    assert.strictEqual(s.allRecipes().length, 2);
+  });
+
+  await test('display quantities rescale with servings, and refuse to invent', () => {
+    const { s, r } = stocked();
+    const doubled = recipes.view(s, r, 8);
+    assert.strictEqual(doubled.shownServings, 8);
+    assert.strictEqual(doubled.ingredients[0].quantity, '320 g', '160 g doubled');
+    assert.strictEqual(doubled.ingredients[0].quantityScaled, true);
+    // A quantity with no number in it cannot be doubled honestly.
+    assert.deepStrictEqual(recipes.scaleQuantity('a pinch', 2), { text: 'a pinch', scaled: false });
+    assert.deepStrictEqual(recipes.scaleQuantity('1/2 tsp', 2), { text: '1 tsp', scaled: true });
+    // Scaling past one pluralises a plain unit word — but never an
+    // abbreviation, where "2 gs" would be worse than the problem being solved.
+    assert.strictEqual(recipes.scaleQuantity('1 can', 2).text, '2 cans');
+    assert.strictEqual(recipes.scaleQuantity('1 clove', 4).text, '4 cloves');
+    assert.strictEqual(recipes.scaleQuantity('160 g', 2).text, '320 g');
+    assert.strictEqual(recipes.scaleQuantity('2 oz', 3).text, '6 oz');
+    assert.strictEqual(recipes.scaleQuantity('3 cups', 2).text, '6 cups', 'already plural stays put');
+    assert.strictEqual(recipes.scaleQuantity('1 box', 2).text, '2 boxes', 'and -es where English wants it');
+  });
+
+  await test('the nutrition panel shows its working and stays flagged as an estimate', () => {
+    const { s, r } = stocked();
+    const v = recipes.view(s, r);
+    assert.strictEqual(v.nutrition.estimate, true);
+    assert.strictEqual(v.nutrition.complete, true);
+    assert.ok(/Estimated from the ingredients/i.test(v.nutrition.basisNote), v.nutrition.basisNote);
+    assert.strictEqual(v.nutrition.perServing.calories_kcal, 250);
+    assert.strictEqual(v.nutrition.total.calories_kcal, 1000);
+  });
+
+  await test('nothing in a recipe grades it (Decision 8)', () => {
+    // No-guilt by shape: there is no field a view could render as a verdict.
+    const { s, r } = stocked();
+    const json = JSON.stringify(recipes.view(s, r));
+    for (const banned of ['score', 'grade', 'rating', 'healthy', 'unhealthy', 'verdict', 'warning', 'flag']) {
+      assert.ok(!new RegExp(`"${banned}`, 'i').test(json), `a recipe must carry no "${banned}" field`);
+    }
+    const src = fs.readFileSync(path.join(ROOT, 'lib/recipes.js'), 'utf8');
+    assert.ok(!/function\s+(score|grade|rate|healthScore)/i.test(src), 'and no function that computes one');
+  });
+
+  await test('the list row is name, servings and per-serving calories (Decision 7)', () => {
+    const { s, r } = stocked();
+    const row = recipes.listRow(s, r);
+    assert.strictEqual(row.name, 'Big batch porridge');
+    assert.strictEqual(row.servings, 4);
+    assert.strictEqual(row.caloriesPerServing, 250);
+  });
+
+  await test('deleting a recipe cleans up the tile and the plan that pointed at it', () => {
+    const { s, r } = stocked();
+    const WEEK = '2026-09-21';
+    s.pinFavorite(r.id, 2);
+    planner.assign(s, WEEK, { date: '2026-09-22', slot: 'lunch', foodId: r.id });
+    assert.ok(s.deleteRecipe(r.id));
+    assert.strictEqual(s.favorites()[2], null, 'a tile pointing at nothing would render blank');
+    const tue = planner.view(s, CFG, WEEK).days.find((d) => d.date === '2026-09-22');
+    assert.strictEqual(tue.slots.find((x) => x.slot === 'lunch').cards.length, 0);
+  });
+
+  await test('a v3 store gains the recipes table with nothing migrated', () => {
+    const dir = tmpDir();
+    fs.writeFileSync(path.join(dir, 'store.json'), JSON.stringify({
+      schemaVersion: 2, foods: [{ id: 'food_a', name: 'oats' }], meals: [{ id: 'meal_x' }],
+    }));
+    const s = new Store(dir).load();
+    assert.deepStrictEqual(s.data.recipes, []);
+    assert.strictEqual(s.data.foods.length, 1, 'prior data untouched');
+    assert.strictEqual(s.data.meals.length, 1);
+    assert.strictEqual(s.data.schemaVersion, SCHEMA_VERSION);
+  });
+}
+
+// ---------------------------------------------------------------------------
 // the stretch routine (GOTK-159)
 // ---------------------------------------------------------------------------
 
@@ -2114,6 +2331,7 @@ async function main() {
   await ateToPlanTests();
   await planIntegrationTests();
   await krogerTests();
+  await recipeTests();
   await stretchTests();
   await movementTests();
   await weightTests();

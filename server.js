@@ -36,6 +36,7 @@ const foods = require('./lib/foods');
 const planner = require('./lib/planner');
 const atetoplan = require('./lib/atetoplan');
 const kroger = require('./lib/kroger');
+const recipeLib = require('./lib/recipes');
 const telegram = require('./lib/telegram');
 
 const cfg = load();
@@ -141,9 +142,47 @@ function oauthPage(title, message) {
 <p><a href="${esc(cfg.publicUrl)}">Back to HealthCoach</a></p></div>`;
 }
 
+/**
+ * Resolve a recipe's ingredient rows against the food library, creating what is
+ * missing — the same create-on-miss rule the planner's search field uses, so a
+ * recipe typed from scratch ends up with real library items behind it and the
+ * nutrition panel has something to count.
+ *
+ * A row that already carries a foodId is left alone. A row whose name matches
+ * an existing item links to it. Only a genuine miss costs a model call, and a
+ * failed estimate leaves the row unlinked rather than failing the whole save:
+ * a recipe with one uncounted ingredient is far more use than no recipe.
+ */
+async function resolveIngredients(list) {
+  const rows = Array.isArray(list) ? list : [];
+  const out = [];
+  const created = [];
+  for (const row of rows) {
+    const name = String((row && row.name) || '').trim();
+    if (!name) continue;
+    if (row.foodId && store.getFood(row.foodId)) {
+      out.push(row);
+      continue;
+    }
+    const hit = foods.search(store, name, { limit: 1 });
+    if (hit.exact && hit.exact.kind !== 'recipe') {
+      out.push({ ...row, foodId: hit.exact.id });
+      continue;
+    }
+    try {
+      const made = await foods.findOrCreate(store, cfg, name);
+      out.push({ ...row, foodId: made.food.id });
+      if (made.created) created.push({ id: made.food.id, name: made.food.name });
+    } catch {
+      out.push({ ...row, foodId: null });
+    }
+  }
+  return { ingredients: out, created };
+}
+
 /** The favourites board as the page renders it: eight positions, holes and all. */
 function favoritesPayload() {
-  return store.favorites().map((id, slot) => (id ? foods.publicFood(store.getFood(id), slot) : null));
+  return store.favorites().map((id, slot) => (id ? foods.publicFood(store.libraryItem(id), slot) : null));
 }
 
 // ---------------------------------------------------------------------------
@@ -178,6 +217,7 @@ async function route(req, res, url) {
         foods: store.data.foods.length,
         favorites: store.favorites().filter(Boolean).length,
         plans: Object.keys(store.data.plans).length,
+        recipes: store.data.recipes.length,
       },
       nutritionEngine: cfg.nutrition.engine,
       briefing: { enabled: cfg.briefing.enabled, time: cfg.briefing.time, timezone: cfg.briefing.timezone },
@@ -297,7 +337,7 @@ async function route(req, res, url) {
     };
     if (q === null) {
       return send(res, 200, {
-        foods: store.allFoods().map((f) => foods.publicFood(f, slotOf(f.id))),
+        foods: store.libraryItems().map((f) => foods.publicFood(f, slotOf(f.id))),
         favorites: favoritesPayload(),
       });
     }
@@ -352,7 +392,7 @@ async function route(req, res, url) {
       favorites: favoritesPayload(),
       slot: out.slot,
       // The replaced pin is unpinned, never deleted (Decision 5).
-      replaced: out.replaced ? foods.publicFood(store.getFood(out.replaced), null) : null,
+      replaced: out.replaced ? foods.publicFood(store.libraryItem(out.replaced), null) : null,
       deleted: false,
     });
   }
@@ -423,6 +463,75 @@ async function route(req, res, url) {
       plan: planner.view(store, cfg, weekStart),
       favorites: favoritesPayload(),
     });
+  }
+
+  // --- recipes (v4 F1/F2) --------------------------------------------------
+  //
+  // Recipes are library citizens, so they also appear in /api/foods search and
+  // on the favourites board. These routes are the recipe-shaped view: the list
+  // the tab opens on, the full document the editor and cook view read, and the
+  // writes. Ingredient rows are resolved against the library on save, with the
+  // same create-on-miss rule as the planner's search field.
+
+  if (method === 'GET' && p === '/api/recipes') {
+    const q = url.searchParams.get('q');
+    let rows = store.allRecipes();
+    if (q && q.trim()) {
+      const hits = new Set(foods.search(store, q).results.map((r) => r.id));
+      rows = rows.filter((r) => hits.has(r.id));
+    }
+    return send(res, 200, {
+      recipes: rows
+        .map((r) => recipeLib.listRow(store, r))
+        .sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1)),
+      estimate: true,
+    });
+  }
+
+  if (method === 'GET' && p.startsWith('/api/recipes/')) {
+    const recipe = store.getRecipe(p.slice('/api/recipes/'.length));
+    if (!recipe) return send(res, 404, { error: 'No such recipe.' });
+    const board = store.favorites();
+    return send(res, 200, {
+      recipe: recipeLib.view(store, recipe, url.searchParams.get('servings')),
+      favoriteSlot: board.indexOf(recipe.id) === -1 ? null : board.indexOf(recipe.id),
+      // So the editor can point at the original without a second request.
+      healthifiedFromName: recipe.healthifiedFrom
+        ? (store.getRecipe(recipe.healthifiedFrom) || {}).name || null
+        : null,
+    });
+  }
+
+  if (method === 'POST' && p === '/api/recipes') {
+    const body = await readJson(req);
+    if (!String(body.name || '').trim()) return send(res, 400, { error: 'A recipe needs a name.' });
+    const out = await resolveIngredients(body.ingredients);
+    const recipe = store.addRecipe({ ...body, ingredients: out.ingredients });
+    return send(res, 201, { recipe: recipeLib.view(store, recipe), created: out.created });
+  }
+
+  if (method === 'PUT' && p.startsWith('/api/recipes/')) {
+    const id = p.slice('/api/recipes/'.length);
+    if (!store.getRecipe(id)) return send(res, 404, { error: 'No such recipe.' });
+    const body = await readJson(req);
+    const patch = { ...body };
+    let created = [];
+    if (body.ingredients !== undefined) {
+      const out = await resolveIngredients(body.ingredients);
+      patch.ingredients = out.ingredients;
+      created = out.created;
+    }
+    // Neither is editable: the link from a healthified copy to its original is
+    // what makes "the healthifier never overwrites" checkable afterwards.
+    delete patch.healthifiedFrom;
+    delete patch.id;
+    return send(res, 200, { recipe: recipeLib.view(store, store.updateRecipe(id, patch)), created });
+  }
+
+  if (method === 'DELETE' && p.startsWith('/api/recipes/')) {
+    const id = p.slice('/api/recipes/'.length);
+    if (!store.deleteRecipe(id)) return send(res, 404, { error: 'No such recipe.' });
+    return send(res, 200, { deleted: id, favorites: favoritesPayload() });
   }
 
   // --- the one-time Kroger authorisation (v3 F5, Decision 8) --------------
