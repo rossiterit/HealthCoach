@@ -38,6 +38,7 @@ const atetoplan = require('./lib/atetoplan');
 const kroger = require('./lib/kroger');
 const recipeLib = require('./lib/recipes');
 const recipebuilder = require('./lib/recipebuilder');
+const shoppinglist = require('./lib/shoppinglist');
 const telegram = require('./lib/telegram');
 
 const cfg = load();
@@ -288,6 +289,7 @@ async function route(req, res, url) {
         plans: Object.keys(store.data.plans).length,
         recipes: store.data.recipes.length,
         proposals: store.data.proposals.filter((x) => !x.resolvedAt).length,
+        shoppingLists: Object.keys(store.data.shoppingLists).length,
       },
       nutritionEngine: cfg.nutrition.engine,
       briefing: { enabled: cfg.briefing.enabled, time: cfg.briefing.time, timezone: cfg.briefing.timezone },
@@ -693,6 +695,76 @@ async function route(req, res, url) {
     const id = p.slice('/api/recipes/'.length);
     if (!store.deleteRecipe(id)) return send(res, 404, { error: 'No such recipe.' });
     return send(res, 200, { deleted: id, favorites: favoritesPayload() });
+  }
+
+  // --- the reviewed shopping list (v5 F4, Decision 9) ----------------------
+  //
+  // Generate from the grid, then review before anything happens. The review is
+  // the same kind of checkpoint the planner's Apply is: the Kroger send below
+  // carries exactly what the owner ticked and nothing else.
+
+  if (method === 'GET' && p === '/api/shopping') {
+    const weeks = planner.plannableWeeks(new Date(), cfg.timezone);
+    const weekStart = weeks.includes(url.searchParams.get('week')) ? url.searchParams.get('week') : weeks[0];
+    const list = shoppinglist.get(store, weekStart);
+    return send(res, 200, {
+      weekStart,
+      list,
+      grouped: list ? shoppinglist.grouped(list) : [],
+      categories: shoppinglist.CATEGORIES,
+      text: list ? shoppinglist.asText(list) : '',
+    });
+  }
+
+  if (method === 'POST' && p === '/api/shopping/generate') {
+    const body = await readJson(req);
+    const weeks = planner.plannableWeeks(new Date(), cfg.timezone);
+    const weekStart = weeks.includes(body.week) ? body.week : weeks[0];
+    // Regenerating RESETS any review. The caller is told so it can say so —
+    // a silent reset would quietly undo a cull the owner had already made.
+    const had = Boolean(shoppinglist.get(store, weekStart));
+    const list = await shoppinglist.generate(store, cfg, weekStart);
+    return send(res, 200, {
+      weekStart,
+      list,
+      grouped: shoppinglist.grouped(list),
+      categories: shoppinglist.CATEGORIES,
+      text: shoppinglist.asText(list),
+      replacedAReview: had,
+    });
+  }
+
+  if (method === 'POST' && p === '/api/shopping/item') {
+    const body = await readJson(req);
+    const weeks = planner.plannableWeeks(new Date(), cfg.timezone);
+    const weekStart = weeks.includes(body.week) ? body.week : weeks[0];
+    const out = shoppinglist.edit(store, weekStart, body.action, body);
+    if (out.error) return send(res, 400, { error: out.error });
+    return send(res, 200, {
+      weekStart,
+      list: out.list,
+      grouped: shoppinglist.grouped(out.list),
+      text: shoppinglist.asText(out.list),
+    });
+  }
+
+  if (method === 'POST' && p === '/api/shopping/send') {
+    const body = await readJson(req);
+    const weeks = planner.plannableWeeks(new Date(), cfg.timezone);
+    const weekStart = weeks.includes(body.week) ? body.week : weeks[0];
+    const list = shoppinglist.get(store, weekStart);
+    if (!list) return send(res, 400, { error: 'There is no list to send yet.' });
+
+    // ONLY the ticked items. This is the whole point of the review step.
+    const items = shoppinglist.forKroger(list);
+    if (!items.length) return send(res, 400, { error: 'Nothing is ticked, so there is nothing to send.' });
+
+    const out = await kroger.sendList(cfg, items);
+    if (out.error) {
+      // Fail closed exactly as v3 does: the plain list always works.
+      return send(res, 200, { ok: false, error: out.error, text: shoppinglist.asText(list), sent: 0 });
+    }
+    return send(res, 200, { ok: true, message: kroger.echo(out), added: out.added, sent: items.length });
   }
 
   // --- the one-time Kroger authorisation (v3 F5, Decision 8) --------------

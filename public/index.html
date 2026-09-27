@@ -552,6 +552,47 @@
   .applyday { font-size: 10px; padding: 2px 8px; color: var(--ac-slate); }
   .applyday:hover { color: var(--ink); }
 
+  /* --- the shopping list review (v5 F4) --- */
+  .shop-panel {
+    border: 1px solid var(--line); border-radius: 3px; background: var(--card);
+    padding: 14px; margin-bottom: 12px;
+  }
+  .shop-cat {
+    font-size: 10px; letter-spacing: .12em; text-transform: uppercase; color: var(--muted);
+    margin: 14px 0 6px; font-weight: normal; border-bottom: 1px solid var(--line); padding-bottom: 4px;
+  }
+  .shop-cat.off { color: var(--muted); opacity: .75; }
+  .shop-items { display: grid; gap: 2px; }
+  .shop-row { display: grid; grid-template-columns: 26px 1fr 96px 26px; gap: 8px; align-items: center; padding: 3px 0; }
+  /* An unticked row stays visible and one tap from coming back: hiding it
+     would make an accidental untick feel like a deletion. */
+  .shop-row.off .nm { color: var(--muted); text-decoration: line-through; }
+  .shop-row .nm { font-size: 13px; overflow-wrap: anywhere; }
+  .shop-row .qty {
+    font: inherit; font-size: 12px; padding: 4px 6px; min-width: 0;
+    border: 1px solid var(--line); border-radius: 3px; background: var(--paper); color: var(--muted);
+  }
+  .tick {
+    width: 22px; height: 22px; border-radius: 3px; cursor: pointer; font-size: 12px; line-height: 1;
+    border: 1px solid var(--line); background: var(--paper); color: var(--paper);
+  }
+  .tick.on { background: var(--ac-green); border-color: var(--ac-green); color: var(--paper); }
+  .shop-row .del { border: none; background: none; font: inherit; color: var(--muted); cursor: pointer; }
+  .shop-row .del:hover { color: var(--ac-clay); }
+  .shop-add { display: flex; gap: 8px; margin: 14px 0 10px; }
+  .shop-add input {
+    flex: 1 1 auto; font: inherit; font-size: 13px; padding: 8px 10px; min-width: 0;
+    border: 1px solid var(--line); border-radius: 3px; background: var(--paper); color: var(--ink);
+  }
+  .shop-copybox {
+    width: 100%; min-height: 160px; font: inherit; font-size: 12px; margin-top: 6px; padding: 8px;
+    border: 1px solid var(--line); border-radius: 3px; background: var(--paper); color: var(--ink);
+  }
+  @media (max-width: 560px) {
+    .shop-row { grid-template-columns: 26px 1fr 70px 24px; gap: 6px; }
+    .shop-row .qty { font-size: 12px; }
+  }
+
   .plan-msg { font-size: 12px; color: var(--muted); min-height: 17px; }
   .plan-msg.warn { color: var(--warn-text); }
 
@@ -1879,6 +1920,216 @@ async function applyProposal(dates, discard) {
   } catch (e) { planMsg(e.message, true); }
 }
 
+// --- the shopping list review (v5 F4) --------------------------------------
+//
+// Generate from the grid, then look at it before anything happens. The review
+// is the checkpoint in front of BOTH the copy and the Kroger send, which is
+// why Send lives in here and nowhere else.
+//
+// Unticking is silent: no confirmation, no explanation, no note about which
+// meal an item came from. The no-guilt rule covers shopping too.
+
+const shop = { open: false, busy: false, data: null, grouped: [], msg: '', warn: false, adding: '' };
+
+async function openShopping() {
+  shop.open = true;
+  shop.msg = '';
+  renderPlan();
+  try {
+    const out = await planApi('/shopping?week=' + encodeURIComponent(plan.week));
+    shop.data = out.list;
+    shop.grouped = out.grouped || [];
+    // No list yet for this week: make one straight away rather than showing an
+    // empty box with a second button in it.
+    if (!shop.data) await generateShopping();
+    else renderPlan();
+  } catch (e) { shop.msg = e.message; shop.warn = true; renderPlan(); }
+}
+
+async function generateShopping() {
+  shop.busy = true; shop.warn = false;
+  shop.msg = 'Working out what you need…';
+  renderPlan();
+  try {
+    const out = await planApi('/shopping/generate', { week: plan.week });
+    shop.data = out.list;
+    shop.grouped = out.grouped || [];
+    shop.busy = false;
+    shop.msg = out.replacedAReview
+      ? 'Rebuilt from the plan — that replaced the list you had already been through.'
+      : '';
+    renderPlan();
+  } catch (e) { shop.busy = false; shop.warn = true; shop.msg = e.message; renderPlan(); }
+}
+
+async function shopEdit(action, payload) {
+  try {
+    const out = await planApi('/shopping/item', { week: plan.week, action, ...payload });
+    shop.data = out.list;
+    shop.grouped = out.grouped || [];
+    renderPlan();
+  } catch (e) { shop.warn = true; shop.msg = e.message; renderPlan(); }
+}
+
+function shoppingPanel() {
+  const box = el('div', 'shop-panel');
+
+  const head = el('div', 'rc-build-head');
+  head.appendChild(el('h3', null, 'Shopping list'));
+  const n = shop.data ? shop.data.items.filter((i) => i.included).length : 0;
+  head.appendChild(el('span', 'hint', shop.data ? `${n} item${n === 1 ? '' : 's'} ticked` : ''));
+  const close = el('button', 'rc-btn quiet', 'Close');
+  close.addEventListener('click', () => { shop.open = false; renderPlan(); });
+  const acts = el('div', 'rc-actions');
+  acts.appendChild(close);
+  head.appendChild(acts);
+  box.appendChild(head);
+
+  if (shop.busy) {
+    box.appendChild(el('div', 'rc-msg', shop.msg || 'Working…'));
+    return box;
+  }
+  if (!shop.data || !shop.data.items.length) {
+    box.appendChild(el('div', 'rc-empty',
+      'Nothing planned for this week yet, so there is nothing to buy. Fill in some days and come back.'));
+    const gen = el('button', 'rc-btn', 'Rebuild from the plan');
+    gen.addEventListener('click', generateShopping);
+    box.appendChild(gen);
+    return box;
+  }
+
+  shop.grouped.forEach((g) => {
+    box.appendChild(el('h4', 'shop-cat', g.category));
+    const ul = el('div', 'shop-items');
+    g.items.forEach((item) => ul.appendChild(shopRow(item)));
+    box.appendChild(ul);
+  });
+
+  // Unticked items sit below, still visible and still one tap from coming
+  // back. Hiding them would make an accidental untick feel like a deletion.
+  const off = shop.data.items.filter((i) => !i.included);
+  if (off.length) {
+    box.appendChild(el('h4', 'shop-cat off', `Not buying (${off.length})`));
+    const ul = el('div', 'shop-items');
+    off.forEach((item) => ul.appendChild(shopRow(item)));
+    box.appendChild(ul);
+  }
+
+  // Add something the plan never knew about.
+  const addRow = el('div', 'shop-add');
+  const input = el('input');
+  input.placeholder = 'Add something else — washing up liquid, bananas…';
+  input.setAttribute('aria-label', 'Add an item');
+  input.value = shop.adding;
+  input.addEventListener('input', () => { shop.adding = input.value; });
+  const doAdd = () => {
+    const name = shop.adding.trim();
+    if (!name) return;
+    shop.adding = '';
+    shopEdit('add', { name });
+  };
+  input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); doAdd(); } });
+  const addBtn = el('button', 'rc-btn', 'Add');
+  addBtn.addEventListener('click', doAdd);
+  addRow.appendChild(input);
+  addRow.appendChild(addBtn);
+  box.appendChild(addRow);
+
+  const foot = el('div', 'rc-foot');
+  const copy = el('button', 'rc-btn', 'Copy as text');
+  copy.addEventListener('click', copyShopping);
+  foot.appendChild(copy);
+
+  const send = el('button', 'rc-btn primary', 'Send to King Soopers');
+  send.id = 'shop-send';
+  send.disabled = !n;
+  send.addEventListener('click', sendShopping);
+  foot.appendChild(send);
+
+  foot.appendChild(el('span', 'spacer'));
+  const regen = el('button', 'rc-btn quiet', 'Rebuild from the plan');
+  regen.addEventListener('click', generateShopping);
+  foot.appendChild(regen);
+  box.appendChild(foot);
+
+  const msg = el('div', 'rc-msg' + (shop.warn ? ' warn' : ''), shop.msg || '');
+  msg.id = 'shop-msg';
+  box.appendChild(msg);
+  return box;
+}
+
+function shopRow(item) {
+  const row = el('div', 'shop-row' + (item.included ? '' : ' off'));
+
+  const tick = el('button', 'tick' + (item.included ? ' on' : ''));
+  tick.type = 'button';
+  tick.setAttribute('role', 'checkbox');
+  tick.setAttribute('aria-checked', String(item.included));
+  tick.setAttribute('aria-label', `${item.included ? 'Buying' : 'Not buying'} ${item.name}`);
+  tick.textContent = item.included ? '✓' : '';
+  // Silent: no confirmation, no comment, no explanation asked for.
+  tick.addEventListener('click', () => shopEdit('toggle', { key: item.key }));
+  row.appendChild(tick);
+
+  row.appendChild(el('span', 'nm', item.name));
+
+  const qty = el('input', 'qty');
+  qty.value = item.quantity || '';
+  qty.placeholder = '—';
+  qty.setAttribute('aria-label', `Quantity for ${item.name}`);
+  qty.addEventListener('change', () => shopEdit('quantity', { key: item.key, quantity: qty.value }));
+  row.appendChild(qty);
+
+  const del = el('button', 'del', '×');
+  del.setAttribute('aria-label', `Remove ${item.name} from the list`);
+  del.addEventListener('click', () => shopEdit('remove', { key: item.key }));
+  row.appendChild(del);
+  return row;
+}
+
+async function copyShopping() {
+  try {
+    const out = await planApi('/shopping?week=' + encodeURIComponent(plan.week));
+    const text = out.text || '';
+    let copied = false;
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(text);
+        copied = true;
+      }
+    } catch { copied = false; }
+    if (copied) {
+      shop.warn = false; shop.msg = 'Copied.';
+      renderPlan();
+      return;
+    }
+    // Clipboard blocked or unavailable: show the text so it can be selected by
+    // hand rather than leaving the owner with a button that does nothing.
+    shop.warn = false;
+    shop.msg = '';
+    renderPlan();
+    const box = el('textarea', 'shop-copybox');
+    box.value = text;
+    box.readOnly = true;
+    box.setAttribute('aria-label', 'Your shopping list, ready to copy');
+    const panel = document.querySelector('.shop-panel');
+    if (panel) { panel.appendChild(el('div', 'rc-msg', 'Select and copy:')); panel.appendChild(box); box.select(); }
+  } catch (e) { shop.warn = true; shop.msg = e.message; renderPlan(); }
+}
+
+async function sendShopping() {
+  const btn = $('shop-send');
+  if (btn) btn.disabled = true;
+  shop.warn = false; shop.msg = 'Sending the ticked items…';
+  renderPlan();
+  try {
+    const out = await planApi('/shopping/send', { week: plan.week });
+    shop.warn = !out.ok;
+    shop.msg = out.ok ? out.message : `${out.error} The list is still here to copy.`;
+    renderPlan();
+  } catch (e) { shop.warn = true; shop.msg = e.message; renderPlan(); }
+}
+
 // --- the Plan tab (v3 F2) -------------------------------------------------
 //
 // Two ways to move a meal, both live at every width:
@@ -2130,6 +2381,9 @@ function renderPlan() {
     b.addEventListener('click', () => loadPlan(plan.weeks[i]));
     weeks.appendChild(b);
   });
+  const shopBtn = el('button', 'rc-btn', 'Create shopping list');
+  shopBtn.addEventListener('click', () => { if (shop.open) { shop.open = false; renderPlan(); } else openShopping(); });
+  head.appendChild(shopBtn);
   const coachBtn = el('button', 'rc-btn', 'Plan with Coach');
   coachBtn.addEventListener('click', () => { plan.coach.open = !plan.coach.open; renderPlan(); });
   head.appendChild(coachBtn);
@@ -2139,6 +2393,7 @@ function renderPlan() {
   // Sunday is not a column that got hidden — it was never in the data.
   host.appendChild(el('p', 'plan-note', 'Monday to Saturday. Sunday is yours. Totals are estimates.'));
 
+  if (shop.open) host.appendChild(shoppingPanel());
   if (plan.coach.open) host.appendChild(coachPanel());
   if (plan.data.proposal) host.appendChild(proposalBar());
 
