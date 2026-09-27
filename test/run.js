@@ -2469,6 +2469,34 @@ async function planPlumbingTests() {
     assert.ok(oats);
   });
 
+  await test('the page sends plan payloads in the shape planApi expects', () => {
+    // planApi(path, payload) stringifies the payload itself. Passing a
+    // fetch-options object instead double-wraps it, and the server then sees
+    // none of the fields: that slip silently turned "apply this day" into
+    // "apply the whole week", and broke Propose entirely. Both were invisible
+    // to every unit test and showed up only when the real UI was driven.
+    const page = fs.readFileSync(path.join(ROOT, 'public/index.html'), 'utf8');
+    const calls = page.match(/planApi\([^)]*\{[^}]*method:\s*'POST'/g) || [];
+    assert.deepStrictEqual(calls, [], 'planApi must never be handed a fetch-options object');
+    assert.ok(/planApi\('\/chat', \{ message: ask \}\)/.test(page), 'propose sends a plain payload');
+    assert.ok(/planApi\(discard \? '\/plan\/discard' : '\/plan\/apply', \{\s*week: plan\.week,\s*dates:/.test(page),
+      'apply sends week and dates as a plain payload');
+  });
+
+  await test('the preview layer is rendered from `proposal`, never from `days`', () => {
+    const page = fs.readFileSync(path.join(ROOT, 'public/index.html'), 'utf8');
+    assert.ok(/function proposedCards\(date, slot\) \{[\s\S]{0,200}plan\.data\.proposal/.test(page),
+      'proposed cards come from the proposal, not the committed days');
+    assert.ok(/card proposed/.test(page), 'and are styled as a separate thing');
+    assert.ok(/\.card\.proposed \{[^}]*border-style: dashed/.test(page),
+      'visibly distinct at a glance — that is the whole of propose-then-apply to the eye');
+    // A proposed card must not be draggable or removable: a proposal is
+    // accepted or binned by the day, not edited in place.
+    const node = /function proposedCardNode\(card\) \{[\s\S]*?\n\}/.exec(page)[0];
+    assert.ok(!/draggable/.test(node), 'not draggable');
+    assert.ok(!/'cx'/.test(node), 'no remove button');
+  });
+
   await test('a proposal carries no scores, totals or comparisons', () => {
     // Decision 5, by shape: there is no field a preview could render as a verdict.
     const { s, oats } = stocked();
