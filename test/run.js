@@ -35,6 +35,7 @@ const recipes = require(path.join(ROOT, 'lib/recipes'));
 const fetcher = require(path.join(ROOT, 'lib/fetcher'));
 const recipeimport = require(path.join(ROOT, 'lib/recipeimport'));
 const recipebuilder = require(path.join(ROOT, 'lib/recipebuilder'));
+const shoppinglist = require(path.join(ROOT, 'lib/shoppinglist'));
 const configLoader = require(path.join(ROOT, 'lib/config'));
 const coach = require(path.join(ROOT, 'lib/coach'));
 const stretch = require(path.join(ROOT, 'lib/stretch'));
@@ -53,6 +54,7 @@ const RATIFIED_TOOLS = [
   'confirm_ate_to_plan',
   'correct_food',
   'correct_meal',
+  'create_shopping_list',
   'favorite_food',
   'import_recipe_from_url',
   'log_meal',
@@ -309,6 +311,11 @@ async function toolTests() {
     //   apply_plan_proposal — copies an accepted proposal into `plans`, or
     //                         discards it. The only path from proposed to
     //                         committed, and it runs only when the owner says.
+    //   create_shopping_list — builds the reviewed list into `shoppingLists`
+    //                         from the plan grid. It ORDERS NOTHING: the
+    //                         Kroger send is a separate, explicit act from
+    //                         the review screen. Added by Decision 9, which
+    //                         pre-ratifies "plan/list plumbing".
     // Neither reaches outside the app; the external surface is unchanged.
     //
     // v4 adds one more, save_recipe, on the same reading: F3 requires drafting,
@@ -340,8 +347,27 @@ async function toolTests() {
     // is now exactly these two, both owner-triggered.
     const EXTERNAL = ['import_recipe_from_url', 'send_list_to_kroger'];
     const names = coach.allTools().map((t) => t.name);
-    const outward = names.filter((n) => /kroger|instacart|walmart|amazon|http|fetch|url|api|web|order|shop|import/i.test(n));
+    const suspicious = names.filter((n) => /kroger|instacart|walmart|amazon|http|fetch|url|api|web|order|shop|import/i.test(n));
+
+    // v5 adds create_shopping_list, which the word-match above flags because
+    // it contains "shop". It is store-only: it BUILDS a list into the store
+    // and orders nothing — the Kroger send stayed a separate, explicit act
+    // from the review screen. Rather than widen the word list and lose the
+    // guard, it is named here and then proved below.
+    const STORE_ONLY_BUT_SUSPICIOUS = ['create_shopping_list'];
+    const outward = suspicious.filter((n) => !STORE_ONLY_BUT_SUSPICIOUS.includes(n));
     assert.deepStrictEqual(outward.sort(), EXTERNAL.slice().sort(), 'the outbound tool surface is exactly Decision 8');
+
+    // The proof, not the assertion: the module behind it cannot reach out.
+    const listSrc = fs.readFileSync(path.join(ROOT, 'lib/shoppinglist.js'), 'utf8');
+    for (const forbidden of ['kroger', 'fetcher', 'http', 'https', 'net', 'dns']) {
+      assert.ok(!new RegExp(`require\\(['"]\\.?\\.?/?${forbidden}['"]\\)`).test(listSrc),
+        `shoppinglist must not require ${forbidden}`);
+    }
+    assert.ok(!/fetch\(/.test(listSrc), 'and must make no request of its own');
+    // And the tool itself must not claim to order anything.
+    const tool = coach.allTools().find((t) => t.name === 'create_shopping_list');
+    assert.ok(/ORDERS NOTHING/i.test(tool.description), 'the tool must say plainly that it orders nothing');
 
     // Every other tool is still store-only, on the original rule.
     const forbidden = /\b(file|path|read_file|write_file|exec|shell|bash|command|http|fetch|url|calendar|email)\b/i;
@@ -2495,6 +2521,128 @@ async function planPlumbingTests() {
     const node = /function proposedCardNode\(card\) \{[\s\S]*?\n\}/.exec(page)[0];
     assert.ok(!/draggable/.test(node), 'not draggable');
     assert.ok(!/'cx'/.test(node), 'no remove button');
+  });
+
+  // --- the reviewed shopping list (v5 F4, GOTK-179) ------------------------
+
+  await test('the review starts with everything ticked', () => {
+    // A list that arrives empty would make the owner do the work twice: the
+    // review is for taking things OUT.
+    const list = { items: [{ key: 'a', included: true }, { key: 'b', included: true }] };
+    assert.strictEqual(shoppinglist.included(list).length, 2);
+  });
+
+  await test('Copy and Send both carry only the ticked items', () => {
+    const list = {
+      items: [
+        { key: 'a', name: 'Oats', quantity: '500 g', category: 'Dry goods', included: true },
+        { key: 'b', name: 'Onions', quantity: '3', category: 'Produce', included: false },
+        { key: 'c', name: 'Milk', quantity: '2 L', category: 'Dairy & eggs', included: true },
+      ],
+    };
+    const text = shoppinglist.asText(list);
+    assert.ok(/Oats/.test(text) && /Milk/.test(text));
+    assert.ok(!/Onions/.test(text), 'an unticked item must not reach the copied text');
+    const kroger = shoppinglist.forKroger(list);
+    assert.deepStrictEqual(kroger.map((i) => i.name), ['Oats', 'Milk'],
+      'nor the cart — that is the whole point of the review');
+  });
+
+  await test('the text is grouped in shop order, not alphabetically', () => {
+    const list = {
+      items: [
+        { key: 'a', name: 'Oats', category: 'Dry goods', included: true, quantity: '' },
+        { key: 'b', name: 'Apples', category: 'Produce', included: true, quantity: '' },
+      ],
+    };
+    const text = shoppinglist.asText(list);
+    assert.ok(text.indexOf('Produce') < text.indexOf('Dry goods'), 'produce comes first in a shop');
+  });
+
+  await test('unticking is silent — no confirmation anywhere in the flow', () => {
+    const page = fs.readFileSync(path.join(ROOT, 'public/index.html'), 'utf8');
+    const tick = /tick\.addEventListener\('click'[^;]*;/.exec(page);
+    assert.ok(tick, 'the tick must have a handler');
+    assert.ok(!/confirm\(/.test(tick[0]), 'no confirmation on unticking');
+    // And no commentary about why something was on the list.
+    assert.ok(!/are you sure/i.test(page));
+    assert.ok(!/that was for/i.test(page));
+  });
+
+  await test('an unticked item stays visible so it can come back', () => {
+    // Hiding it would make an accidental untick feel like a deletion.
+    const page = fs.readFileSync(path.join(ROOT, 'public/index.html'), 'utf8');
+    assert.ok(/Not buying \(/.test(page), 'unticked items get their own section');
+    assert.ok(/\.shop-row\.off/.test(page), 'and are styled as set aside, not gone');
+  });
+
+  await test('editing the review keeps it — a cull is a decision, not UI state', () => {
+    const s = new Store(tmpDir()).load();
+    const week = '2026-09-21';
+    s.setShoppingList(week, {
+      weekStart: week, generatedAt: new Date().toISOString(),
+      items: [{ key: 'a', name: 'Oats', quantity: '', category: 'Dry goods', included: true, fromRecipes: [] }],
+    });
+    shoppinglist.edit(s, week, 'toggle', { key: 'a' });
+    assert.strictEqual(s.getShoppingList(week).items[0].included, false);
+    // ...and it survives a reload, like everything else in the store.
+    const again = new Store(s.dataDir);
+    again.data = JSON.parse(JSON.stringify(s.data));
+    assert.strictEqual(again.getShoppingList(week).items[0].included, false);
+  });
+
+  await test('an item can be added by hand, and removed entirely', () => {
+    const s = new Store(tmpDir()).load();
+    const week = '2026-09-21';
+    s.setShoppingList(week, { weekStart: week, items: [] });
+    shoppinglist.edit(s, week, 'add', { name: 'Washing up liquid' });
+    const added = s.getShoppingList(week).items[0];
+    assert.strictEqual(added.name, 'Washing up liquid');
+    assert.strictEqual(added.included, true);
+    assert.strictEqual(added.manual, true, 'marked so a rebuild can say what it is about to lose');
+    shoppinglist.edit(s, week, 'quantity', { key: added.key, quantity: '1 bottle' });
+    assert.strictEqual(s.getShoppingList(week).items[0].quantity, '1 bottle');
+    shoppinglist.edit(s, week, 'remove', { key: added.key });
+    assert.strictEqual(s.getShoppingList(week).items.length, 0);
+  });
+
+  await test('editing a list that does not exist is refused, not invented', () => {
+    const s = new Store(tmpDir()).load();
+    assert.ok(shoppinglist.edit(s, '2026-09-21', 'toggle', { key: 'x' }).error);
+  });
+
+  await test('the review reaches nothing outside the app', () => {
+    // The Kroger send stayed a separate, explicit act. This module builds a
+    // list; it does not order one.
+    const src = fs.readFileSync(path.join(ROOT, 'lib/shoppinglist.js'), 'utf8');
+    for (const forbidden of ['kroger', 'fetcher', 'http', 'https']) {
+      assert.ok(!new RegExp(`require\\(['"]\\./${forbidden}['"]\\)`).test(src), `must not require ${forbidden}`);
+    }
+    for (const name of Object.keys(shoppinglist)) {
+      assert.ok(!/send|order|checkout|buy/i.test(name), `shoppinglist.${name} sounds like it orders something`);
+    }
+  });
+
+  await test('the categories are aisles, and carry no judgement', () => {
+    assert.ok(shoppinglist.CATEGORIES.includes('Produce'));
+    assert.ok(shoppinglist.CATEGORIES.includes('Other'), 'anything unclassifiable has somewhere to go');
+    for (const c of shoppinglist.CATEGORIES) {
+      // Word-anchored: "Dry goods" is an aisle, and an unanchored /good/
+      // flags it — the same over-broad match that made the first Treat guard
+      // fail correct recipes.
+      assert.ok(!/\bhealthy\b|\btreats?\b|\bjunk\b|\bgood\b|\bbad\b|\bindulgent\b/i.test(c),
+        `"${c}" is a judgement, not an aisle`);
+    }
+    assert.ok(/labelling rows, not reading a diet/i.test(shoppinglist.CATEGORY_SYSTEM),
+      'and the categoriser is told to say nothing about the food');
+  });
+
+  await test('the coach is told the list orders nothing and unticking is silent', () => {
+    const p = dietcoach.persona(new Store(tmpDir()).load());
+    assert.ok(/create_shopping_list/.test(p));
+    assert.ok(/orders nothing/i.test(p));
+    assert.ok(/Unticking is silent/i.test(p));
+    assert.ok(/not your business/i.test(p));
   });
 
   await test('a proposal carries no scores, totals or comparisons', () => {
