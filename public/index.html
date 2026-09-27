@@ -223,6 +223,156 @@
     .turn.coach .bubble, .turn.owner .bubble, .meal { max-width: 100%; }
   }
 
+  /* --- the Recipes tab (v4 F2) -------------------------------------------
+     Decision 7's layout, which is the contract this release since there is no
+     mockup: a searchable list (name, servings, per-serving calories) opens an
+     editor (title, servings stepper, ingredient rows, steps, nutrition panel);
+     a Cook button switches to a read-only cook view. Phone-first — every
+     section stacks, nothing scrolls sideways, and the cook view is set large
+     enough to read propped against something on a counter.
+
+     Nothing here grades a recipe (Decision 8). No colour means "bad", there is
+     no badge and no warning: the nutrition panel is the same plain ink as the
+     planner's totals row, for the same reason. */
+
+  #view-recipes { padding: 18px 20px 48px; max-width: 860px; margin: 0 auto; }
+
+  .rc-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
+  .rc-head h2 { font-family: var(--serif); font-weight: normal; font-size: 21px; margin: 0; }
+  .rc-head .count { font-size: 11px; color: var(--muted); }
+  .rc-actions { margin-left: auto; display: flex; gap: 8px; }
+
+  .rc-btn {
+    font: inherit; font-size: 13px; padding: 8px 16px; border-radius: 20px;
+    border: 1px solid var(--line); background: var(--card); color: var(--ink); cursor: pointer;
+  }
+  .rc-btn:hover { background: var(--paper2); }
+  .rc-btn:disabled { opacity: .5; cursor: default; }
+  .rc-btn.primary { background: var(--ink); color: var(--paper); border-color: var(--ink); }
+  .rc-btn.primary:hover { background: #2b2118; }
+  .rc-btn.quiet { border-color: transparent; color: var(--muted); padding: 8px 10px; }
+  .rc-btn.quiet:hover { color: var(--ink); }
+
+  .rc-search {
+    width: 100%; font: inherit; font-size: 14px; padding: 9px 11px; margin-bottom: 14px;
+    border: 1px solid var(--line); border-radius: 3px; background: var(--card); color: var(--ink);
+  }
+
+  /* --- list --- */
+  .rc-list { display: grid; gap: 8px; }
+  .rc-card {
+    border: 1px solid var(--line); border-radius: 3px; background: var(--card);
+    padding: 12px 14px; cursor: pointer; display: flex; gap: 12px; align-items: baseline; flex-wrap: wrap;
+  }
+  .rc-card:hover { border-color: var(--ink); }
+  .rc-card h3 { font-family: var(--serif); font-weight: normal; font-size: 17px; margin: 0; flex: 1 1 auto; }
+  .rc-card .meta { font-size: 12px; color: var(--muted); }
+  .rc-card .kcal { font-size: 12px; color: var(--ink); }
+  .rc-card .from { font-size: 11px; color: var(--ac-green); }
+  .rc-empty { color: var(--muted); font-size: 13px; padding: 18px 0; }
+
+  /* --- editor --- */
+  .rc-editor { display: grid; gap: 18px; }
+  .rc-title {
+    width: 100%; font-family: var(--serif); font-size: 21px; padding: 8px 10px;
+    border: 1px solid var(--line); border-radius: 3px; background: var(--card); color: var(--ink);
+  }
+  .rc-row { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; }
+  .rc-field { display: flex; gap: 7px; align-items: center; font-size: 12px; color: var(--muted); }
+  .rc-field input[type="number"] {
+    width: 62px; font: inherit; font-size: 14px; padding: 6px 8px; text-align: center;
+    border: 1px solid var(--line); border-radius: 3px; background: var(--card); color: var(--ink);
+  }
+  .stepper { display: flex; align-items: center; gap: 4px; }
+  .stepper button {
+    font: inherit; font-size: 16px; line-height: 1; width: 32px; height: 32px; cursor: pointer;
+    border: 1px solid var(--line); border-radius: 16px; background: var(--card); color: var(--ink);
+  }
+  .stepper button:hover { border-color: var(--ink); }
+
+  .rc-section h4 {
+    font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: var(--muted);
+    margin: 0 0 8px; font-weight: normal;
+  }
+
+  .ing { display: grid; grid-template-columns: 1fr 110px 74px 32px; gap: 6px; margin-bottom: 6px; align-items: center; }
+  .ing input {
+    font: inherit; font-size: 13px; padding: 7px 9px; min-width: 0;
+    border: 1px solid var(--line); border-radius: 3px; background: var(--card); color: var(--ink);
+  }
+  .ing .del, .stp .del {
+    border: none; background: none; font: inherit; font-size: 15px; color: var(--muted); cursor: pointer;
+  }
+  .ing .del:hover, .stp .del:hover { color: var(--ac-clay); }
+  .ing-head { display: grid; grid-template-columns: 1fr 110px 74px 32px; gap: 6px; font-size: 10px;
+              letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin-bottom: 4px; }
+
+  .stp { display: grid; grid-template-columns: 22px 1fr auto 32px; gap: 6px; margin-bottom: 6px; align-items: start; }
+  .stp .n { font-size: 12px; color: var(--muted); padding-top: 9px; }
+  .stp textarea {
+    font: inherit; font-size: 13px; padding: 7px 9px; resize: vertical; min-height: 38px;
+    border: 1px solid var(--line); border-radius: 3px; background: var(--card); color: var(--ink);
+  }
+  .stp .move { display: flex; flex-direction: column; gap: 2px; }
+  .stp .move button {
+    font: inherit; font-size: 10px; line-height: 1; padding: 2px 5px; cursor: pointer;
+    border: 1px solid var(--line); border-radius: 2px; background: var(--card); color: var(--muted);
+  }
+  .stp .move button:hover { color: var(--ink); border-color: var(--ink); }
+  .stp .move button:disabled { opacity: .3; cursor: default; }
+
+  /* Nutrition panel: plain ink, per-serving first, and it shows its working. */
+  .rc-nut { border: 1px solid var(--line); border-radius: 3px; background: var(--paper2); padding: 12px 14px; }
+  .rc-nut .per { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 13px; }
+  .rc-nut .per b { font-weight: 600; }
+  .rc-nut .tot { font-size: 11px; color: var(--muted); margin-top: 7px; }
+  .rc-nut .basis { font-size: 11px; color: var(--muted); margin-top: 5px; font-style: italic; }
+  .rc-nut .partial { font-size: 11px; color: var(--warn-text); margin-top: 5px; }
+
+  .rc-msg { font-size: 12px; color: var(--muted); min-height: 17px; }
+  .rc-msg.warn { color: var(--warn-text); }
+  .rc-foot { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .rc-foot .spacer { flex: 1 1 auto; }
+
+  /* --- cook view: read-only, set to be read at arm's length --- */
+  .cook { font-size: 17px; line-height: 1.6; }
+  .cook h2 { font-family: var(--serif); font-weight: normal; font-size: 27px; margin: 0 0 4px; }
+  .cook .sub { font-size: 13px; color: var(--muted); margin-bottom: 20px; }
+  .cook h4 { font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: var(--muted);
+             margin: 0 0 10px; font-weight: normal; }
+  .cook .ings { list-style: none; padding: 0; margin: 0 0 26px; }
+  .cook .ings li { padding: 7px 0; border-bottom: 1px solid var(--line); display: flex; gap: 14px; }
+  .cook .ings li .q { color: var(--muted); min-width: 92px; }
+  .cook .steps { list-style: none; padding: 0; margin: 0; counter-reset: s; }
+  .cook .steps li { padding: 12px 0 12px 40px; border-bottom: 1px solid var(--line); position: relative; counter-increment: s; }
+  .cook .steps li::before {
+    content: counter(s); position: absolute; left: 0; top: 12px;
+    font-family: var(--serif); font-size: 19px; color: var(--ac-gold);
+  }
+  .cook .one { padding: 26px 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+  .cook .one .n { font-size: 12px; color: var(--muted); letter-spacing: .1em; text-transform: uppercase; margin-bottom: 10px; }
+  .cook .one .txt { font-size: 21px; line-height: 1.5; }
+  .cook .nav { display: flex; gap: 8px; align-items: center; margin-top: 18px; }
+  .cook .nav .spacer { flex: 1 1 auto; }
+
+  @media (max-width: 560px) {
+    #view-recipes { padding: 16px; }
+    /* Ingredient and step rows stack rather than squeezing four columns onto a
+       phone — Decision 7 asks for tap targets and no horizontal scroll. */
+    .ing, .ing-head { grid-template-columns: 1fr 1fr; }
+    .ing-head { display: none; }
+    .ing input { font-size: 15px; padding: 9px; }
+    .ing .name { grid-column: 1 / -1; }
+    .ing .del { justify-self: end; }
+    .stp { grid-template-columns: 22px 1fr; }
+    .stp .move { flex-direction: row; grid-column: 2; }
+    .stp .del { grid-column: 2; justify-self: end; margin-top: -30px; }
+    .cook { font-size: 18px; }
+    .cook h2 { font-size: 24px; }
+    .cook .one .txt { font-size: 20px; }
+    .cook .ings li { flex-direction: column; gap: 2px; }
+  }
+
   /* --- the Plan tab (v3 F2) ---------------------------------------------
      Laid out to the owner's mockup: six day columns Monday–Saturday, four
      slot rows labelled vertically down a left gutter, a daily totals row
@@ -398,6 +548,7 @@
       <button class="tab" id="tab-stretch" role="tab" aria-selected="false" aria-controls="view-stretch">Stretch</button>
       <button class="tab" id="tab-trend" role="tab" aria-selected="false" aria-controls="view-trend">Trend</button>
       <button class="tab" id="tab-plan" role="tab" aria-selected="false" aria-controls="view-plan">Plan</button>
+      <button class="tab" id="tab-recipes" role="tab" aria-selected="false" aria-controls="view-recipes">Recipes</button>
     </div>
     <div class="today">Today <b id="today">—</b></div>
   </div>
@@ -411,6 +562,7 @@
   <div class="view wrap" id="view-stretch" role="tabpanel" hidden></div>
   <div class="view wrap" id="view-trend" role="tabpanel" hidden></div>
   <div class="view" id="view-plan" role="tabpanel" hidden></div>
+  <div class="view" id="view-recipes" role="tabpanel" hidden></div>
 </main>
 
 <footer>
@@ -630,6 +782,7 @@ const TABS = [
   { tab: 'tab-stretch', view: 'view-stretch' },
   { tab: 'tab-trend', view: 'view-trend' },
   { tab: 'tab-plan', view: 'view-plan' },
+  { tab: 'tab-recipes', view: 'view-recipes' },
 ];
 let stretchLoaded = false;
 
@@ -643,6 +796,7 @@ function showTab(id) {
   if (id === 'tab-stretch' && !stretchLoaded) loadStretch();
   if (id === 'tab-trend') loadTrend();
   if (id === 'tab-plan') loadPlan();
+  if (id === 'tab-recipes') loadRecipes();
   $('main').scrollTop = 0;
   if (id === 'tab-chat') scroll();
 }
@@ -821,6 +975,533 @@ function renderMovement(host, d) {
     }
     host.appendChild(s);
   }
+}
+
+// --- the Recipes tab (v4 F2) ----------------------------------------------
+//
+// Three screens behind one tab, per Decision 7: a searchable list, an editor,
+// and a read-only cook view. The spec had no mockup this release, so the words
+// are the contract and the finish is Paper & Ink.
+//
+// The editor holds a working copy and saves on demand rather than on every
+// keystroke: saving an ingredient row runs create-on-miss against the library,
+// which can cost a model call, and doing that per character would be both slow
+// and a way to fill the library with half-typed words.
+//
+// NOTHING HERE GRADES A RECIPE (Decision 8). The nutrition panel renders plain
+// numbers in plain ink and says where they came from. There is no threshold, no
+// colour that means "bad", and no unprompted suggestion to eat something else.
+
+const rc = {
+  screen: 'list',   // 'list' | 'editor' | 'cook'
+  list: [],
+  query: '',
+  draft: null,      // the recipe being edited, as a working copy
+  saved: null,      // what the server last returned, for the nutrition panel
+  cookStep: null,   // null = full list, otherwise a zero-based step index
+  busy: false,
+};
+
+function rcMsg(text, warn) {
+  const m = $('rc-msg');
+  if (!m) return;
+  m.textContent = text || '';
+  m.className = 'rc-msg' + (warn ? ' warn' : '');
+}
+
+async function rcApi(path, opts) {
+  const res = await fetch(API + path, opts);
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || 'That did not work.');
+  return data;
+}
+
+async function loadRecipes() {
+  const host = $('view-recipes');
+  if (!rc.list.length) { host.textContent = ''; host.appendChild(el('div', 'note', 'Loading recipes…')); }
+  try {
+    const d = await rcApi('/recipes');
+    rc.list = d.recipes || [];
+    if (rc.screen === 'list') renderRecipes();
+  } catch (e) {
+    host.textContent = '';
+    host.appendChild(el('div', 'note', 'Could not load recipes: ' + e.message));
+  }
+}
+
+function renderRecipes() {
+  const host = $('view-recipes');
+  host.textContent = '';
+  if (rc.screen === 'editor') return renderEditor(host);
+  if (rc.screen === 'cook') return renderCook(host);
+  return renderList(host);
+}
+
+// --- list -------------------------------------------------------------------
+
+function renderList(host) {
+  const head = el('div', 'rc-head');
+  head.appendChild(el('h2', null, 'Recipes'));
+  head.appendChild(el('span', 'count', rc.list.length ? `${rc.list.length} saved` : ''));
+  const actions = el('div', 'rc-actions');
+  const add = el('button', 'rc-btn primary', 'New recipe');
+  add.addEventListener('click', () => startNewRecipe());
+  actions.appendChild(add);
+  head.appendChild(actions);
+  host.appendChild(head);
+
+  const search = el('input', 'rc-search');
+  search.placeholder = 'Search your recipes…';
+  search.setAttribute('aria-label', 'Search your recipes');
+  search.value = rc.query;
+  search.addEventListener('input', () => { rc.query = search.value; renderFiltered(); });
+  host.appendChild(search);
+
+  const list = el('div', 'rc-list');
+  list.id = 'rc-list';
+  host.appendChild(list);
+  renderFiltered();
+}
+
+function renderFiltered() {
+  const list = $('rc-list');
+  if (!list) return;
+  list.textContent = '';
+  const q = rc.query.trim().toLowerCase();
+  const rows = q ? rc.list.filter((r) => r.name.toLowerCase().includes(q)) : rc.list;
+
+  if (!rows.length) {
+    list.appendChild(
+      el('div', 'rc-empty', rc.list.length
+        ? 'Nothing matches that.'
+        : 'No recipes yet. Start one with New recipe, or paste a recipe into the chat and ask me to save it.'),
+    );
+    return;
+  }
+  rows.forEach((r) => list.appendChild(listCard(r)));
+}
+
+function listCard(r) {
+  // Decision 7's list row: name, servings, per-serving calories.
+  const card = el('div', 'rc-card');
+  card.setAttribute('role', 'button');
+  card.tabIndex = 0;
+  card.appendChild(el('h3', null, r.name));
+  card.appendChild(el('span', 'meta', `serves ${r.servings}`));
+  card.appendChild(el('span', 'kcal',
+    r.caloriesPerServing == null ? 'no figures yet' : `${r.caloriesPerServing} kcal a serving`));
+  if (r.healthifiedFrom) card.appendChild(el('span', 'from', 'healthified'));
+  const open = () => openRecipe(r.id);
+  card.addEventListener('click', open);
+  card.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(); } });
+  return card;
+}
+
+// --- editor -----------------------------------------------------------------
+
+function blankRecipe() {
+  return { id: null, name: '', servings: 4, prepMinutes: null, cookMinutes: null, ingredients: [], steps: [] };
+}
+
+function startNewRecipe() {
+  rc.draft = blankRecipe();
+  rc.saved = null;
+  rc.screen = 'editor';
+  renderRecipes();
+}
+
+async function openRecipe(id) {
+  try {
+    const d = await rcApi('/recipes/' + encodeURIComponent(id));
+    rc.saved = d.recipe;
+    rc.draft = {
+      id: d.recipe.id,
+      name: d.recipe.name,
+      servings: d.recipe.servings,
+      prepMinutes: d.recipe.prepMinutes,
+      cookMinutes: d.recipe.cookMinutes,
+      // The editor works in the recipe's OWN servings, so it edits what is
+      // stored rather than a rescaled view of it.
+      ingredients: d.recipe.ingredients.map((i) => ({
+        foodId: i.foodId, name: i.name, quantity: i.originalQuantity, amount: i.amount,
+      })),
+      steps: d.recipe.steps.slice(),
+      healthifiedFromName: d.healthifiedFromName,
+    };
+    rc.screen = 'editor';
+    renderRecipes();
+  } catch (e) {
+    rcMsg(e.message, true);
+  }
+}
+
+function renderEditor(host) {
+  const d = rc.draft;
+
+  const head = el('div', 'rc-head');
+  const back = el('button', 'rc-btn quiet', '← All recipes');
+  back.addEventListener('click', () => { rc.screen = 'list'; rc.query = ''; loadRecipes().then(renderRecipes); });
+  head.appendChild(back);
+  const actions = el('div', 'rc-actions');
+  if (d.id) {
+    const cook = el('button', 'rc-btn', 'Cook');
+    cook.addEventListener('click', () => { rc.cookStep = null; rc.screen = 'cook'; renderRecipes(); });
+    actions.appendChild(cook);
+  }
+  head.appendChild(actions);
+  host.appendChild(head);
+
+  const ed = el('div', 'rc-editor');
+
+  const title = el('input', 'rc-title');
+  title.placeholder = 'Recipe name';
+  title.setAttribute('aria-label', 'Recipe name');
+  title.value = d.name;
+  title.addEventListener('input', () => { d.name = title.value; });
+  ed.appendChild(title);
+
+  if (d.healthifiedFromName) {
+    ed.appendChild(el('div', 'rc-msg', `A healthified version of ${d.healthifiedFromName}, which is still saved.`));
+  }
+
+  // --- servings + times ---
+  const row = el('div', 'rc-row');
+  const servField = el('div', 'rc-field');
+  servField.appendChild(el('span', null, 'Serves'));
+  const stepper = el('div', 'stepper');
+  const minus = el('button', null, '−');
+  minus.setAttribute('aria-label', 'One fewer serving');
+  const servInput = el('input');
+  servInput.type = 'number'; servInput.min = '1'; servInput.max = '99';
+  servInput.setAttribute('aria-label', 'Servings');
+  servInput.value = String(d.servings);
+  const plus = el('button', null, '+');
+  plus.setAttribute('aria-label', 'One more serving');
+  const setServings = (n) => {
+    d.servings = Math.min(Math.max(parseInt(n, 10) || 1, 1), 99);
+    servInput.value = String(d.servings);
+    paintNutrition();
+  };
+  minus.addEventListener('click', () => setServings(d.servings - 1));
+  plus.addEventListener('click', () => setServings(d.servings + 1));
+  servInput.addEventListener('change', () => setServings(servInput.value));
+  stepper.appendChild(minus); stepper.appendChild(servInput); stepper.appendChild(plus);
+  servField.appendChild(stepper);
+  row.appendChild(servField);
+
+  [['Prep', 'prepMinutes'], ['Cook', 'cookMinutes']].forEach(([label, key]) => {
+    const f = el('div', 'rc-field');
+    f.appendChild(el('span', null, label));
+    const inp = el('input');
+    inp.type = 'number'; inp.min = '0';
+    inp.setAttribute('aria-label', `${label} minutes`);
+    inp.value = d[key] == null ? '' : String(d[key]);
+    inp.addEventListener('input', () => { d[key] = inp.value === '' ? null : Number(inp.value); });
+    f.appendChild(inp);
+    f.appendChild(el('span', null, 'min'));
+    row.appendChild(f);
+  });
+  ed.appendChild(row);
+
+  // --- ingredients ---
+  const ingSec = el('div', 'rc-section');
+  ingSec.appendChild(el('h4', null, 'Ingredients'));
+  const ingHead = el('div', 'ing-head');
+  ['Ingredient', 'Quantity', 'Servings', ''].forEach((h) => ingHead.appendChild(el('span', null, h)));
+  ingSec.appendChild(ingHead);
+  const ingList = el('div');
+  ingList.id = 'rc-ings';
+  ingSec.appendChild(ingList);
+  const addIng = el('button', 'rc-btn', '+ Ingredient');
+  addIng.addEventListener('click', () => {
+    d.ingredients.push({ foodId: null, name: '', quantity: '', amount: 1 });
+    paintIngredients();
+  });
+  ingSec.appendChild(addIng);
+  ed.appendChild(ingSec);
+
+  // --- steps ---
+  const stepSec = el('div', 'rc-section');
+  stepSec.appendChild(el('h4', null, 'Method'));
+  const stepList = el('div');
+  stepList.id = 'rc-steps';
+  stepSec.appendChild(stepList);
+  const addStep = el('button', 'rc-btn', '+ Step');
+  addStep.addEventListener('click', () => { d.steps.push(''); paintSteps(); });
+  stepSec.appendChild(addStep);
+  ed.appendChild(stepSec);
+
+  // --- nutrition ---
+  const nut = el('div', 'rc-nut');
+  nut.id = 'rc-nut';
+  ed.appendChild(nut);
+
+  const msg = el('div', 'rc-msg', '');
+  msg.id = 'rc-msg';
+  ed.appendChild(msg);
+
+  const foot = el('div', 'rc-foot');
+  const save = el('button', 'rc-btn primary', d.id ? 'Save changes' : 'Save recipe');
+  save.id = 'rc-save';
+  save.addEventListener('click', saveRecipe);
+  foot.appendChild(save);
+  foot.appendChild(el('span', 'spacer'));
+  if (d.id) {
+    const del = el('button', 'rc-btn quiet', 'Delete');
+    del.addEventListener('click', deleteRecipe);
+    foot.appendChild(del);
+  }
+  ed.appendChild(foot);
+
+  host.appendChild(ed);
+  paintIngredients();
+  paintSteps();
+  paintNutrition();
+}
+
+function paintIngredients() {
+  const host = $('rc-ings');
+  if (!host) return;
+  host.textContent = '';
+  rc.draft.ingredients.forEach((row, i) => {
+    const r = el('div', 'ing');
+
+    const name = el('input', 'name');
+    name.placeholder = 'e.g. ground chicken';
+    name.setAttribute('aria-label', `Ingredient ${i + 1}`);
+    name.value = row.name;
+    name.addEventListener('input', () => {
+      // Renaming breaks the link to the library item; it is re-resolved on
+      // save, with create-on-miss, rather than guessed at per keystroke.
+      if (name.value !== row.name) row.foodId = null;
+      row.name = name.value;
+    });
+    r.appendChild(name);
+
+    const qty = el('input');
+    qty.placeholder = '200 g';
+    qty.setAttribute('aria-label', `Quantity for ingredient ${i + 1}`);
+    qty.value = row.quantity;
+    qty.addEventListener('input', () => { row.quantity = qty.value; });
+    r.appendChild(qty);
+
+    const amt = el('input');
+    amt.type = 'number'; amt.step = '0.25'; amt.min = '0.25';
+    // This is the number the macro maths uses — see lib/recipes.js.
+    amt.title = 'How many of this item’s library servings this row is — what the calorie maths counts';
+    amt.setAttribute('aria-label', `Library servings for ingredient ${i + 1}`);
+    amt.value = String(row.amount);
+    amt.addEventListener('change', () => { row.amount = Number(amt.value) || 1; });
+    r.appendChild(amt);
+
+    const del = el('button', 'del', '×');
+    del.setAttribute('aria-label', `Remove ingredient ${i + 1}`);
+    del.addEventListener('click', () => { rc.draft.ingredients.splice(i, 1); paintIngredients(); });
+    r.appendChild(del);
+
+    host.appendChild(r);
+  });
+  if (!rc.draft.ingredients.length) host.appendChild(el('div', 'rc-empty', 'No ingredients yet.'));
+}
+
+function paintSteps() {
+  const host = $('rc-steps');
+  if (!host) return;
+  host.textContent = '';
+  rc.draft.steps.forEach((text, i) => {
+    const r = el('div', 'stp');
+    r.appendChild(el('div', 'n', String(i + 1)));
+
+    const ta = el('textarea');
+    ta.setAttribute('aria-label', `Step ${i + 1}`);
+    ta.value = text;
+    ta.addEventListener('input', () => { rc.draft.steps[i] = ta.value; });
+    r.appendChild(ta);
+
+    const move = el('div', 'move');
+    const up = el('button', null, '↑');
+    up.setAttribute('aria-label', `Move step ${i + 1} up`);
+    up.disabled = i === 0;
+    up.addEventListener('click', () => { swapSteps(i, i - 1); });
+    const down = el('button', null, '↓');
+    down.setAttribute('aria-label', `Move step ${i + 1} down`);
+    down.disabled = i === rc.draft.steps.length - 1;
+    down.addEventListener('click', () => { swapSteps(i, i + 1); });
+    move.appendChild(up); move.appendChild(down);
+    r.appendChild(move);
+
+    const del = el('button', 'del', '×');
+    del.setAttribute('aria-label', `Remove step ${i + 1}`);
+    del.addEventListener('click', () => { rc.draft.steps.splice(i, 1); paintSteps(); });
+    r.appendChild(del);
+
+    host.appendChild(r);
+  });
+  if (!rc.draft.steps.length) host.appendChild(el('div', 'rc-empty', 'No steps yet.'));
+}
+
+function swapSteps(a, b) {
+  const s = rc.draft.steps;
+  [s[a], s[b]] = [s[b], s[a]];
+  paintSteps();
+}
+
+/**
+ * The nutrition panel. Per-serving first, because that is the canonical unit;
+ * the total underneath; the basis stated; and, when some ingredients are not in
+ * the library yet, how many were actually counted — a partial total that looks
+ * complete is worse than no total.
+ */
+function paintNutrition() {
+  const host = $('rc-nut');
+  if (!host) return;
+  host.textContent = '';
+  const n = rc.saved && rc.saved.nutrition;
+
+  host.appendChild(el('h4', null, `Per serving — estimated${rc.draft.servings !== (rc.saved && rc.saved.servings) ? ' (save to update)' : ''}`));
+  if (!n || !n.countedCount) {
+    host.appendChild(el('div', 'rc-msg',
+      rc.draft.id ? 'No figures yet — add ingredients the library knows.' : 'Figures appear once the recipe is saved.'));
+    return;
+  }
+
+  const per = el('div', 'per');
+  [['calories_kcal', '', 'Calories'], ['protein_g', 'g', 'Protein'], ['fat_g', 'g', 'Fat'],
+   ['carb_g', 'g', 'Carbs'], ['sodium_mg', 'mg', 'Sodium']].forEach(([k, unit, label]) => {
+    const v = n.perServing[k];
+    const span = el('span');
+    if (v == null) { span.textContent = `${label} —`; }
+    else { span.appendChild(el('b', null, String(v) + unit)); span.appendChild(document.createTextNode(' ' + label)); }
+    per.appendChild(span);
+  });
+  host.appendChild(per);
+
+  if (n.total.calories_kcal != null) {
+    host.appendChild(el('div', 'tot', `Whole recipe about ${n.total.calories_kcal} kcal, serving ${rc.saved.servings}.`));
+  }
+  host.appendChild(el('div', 'basis', n.basisNote));
+  if (!n.complete) {
+    host.appendChild(el('div', 'partial',
+      `Counted ${n.countedCount} of ${n.ingredientCount} ingredients — the rest are not in your library yet, so they add nothing to these figures.`));
+  }
+}
+
+async function saveRecipe() {
+  const d = rc.draft;
+  if (!d.name.trim()) { rcMsg('Give it a name first.', true); return; }
+  const btn = $('rc-save');
+  btn.disabled = true;
+  rcMsg('Saving…');
+  const body = {
+    name: d.name,
+    servings: d.servings,
+    prepMinutes: d.prepMinutes,
+    cookMinutes: d.cookMinutes,
+    ingredients: d.ingredients.filter((i) => i.name.trim()),
+    steps: d.steps.filter((s) => s.trim()),
+  };
+  try {
+    const out = d.id
+      ? await rcApi('/recipes/' + encodeURIComponent(d.id), {
+          method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+      : await rcApi('/recipes', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    rc.saved = out.recipe;
+    d.id = out.recipe.id;
+    d.ingredients = out.recipe.ingredients.map((i) => ({
+      foodId: i.foodId, name: i.name, quantity: i.originalQuantity, amount: i.amount,
+    }));
+    await loadRecipes();
+    renderRecipes();
+    rcMsg((out.created && out.created.length)
+      ? `Saved. Added ${out.created.map((c) => c.name).join(', ')} to your food library, estimated.`
+      : 'Saved.');
+  } catch (e) {
+    rcMsg(e.message, true);
+    if ($('rc-save')) $('rc-save').disabled = false;
+  }
+}
+
+async function deleteRecipe() {
+  const d = rc.draft;
+  if (!d.id) return;
+  // Deleting also clears any favourite tile and planner card pointing at it,
+  // so the confirmation says so rather than surprising anyone.
+  if (!window.confirm(`Delete ${d.name}? It will also come off any favourite tile and any day it was planned into.`)) return;
+  try {
+    await rcApi('/recipes/' + encodeURIComponent(d.id), { method: 'DELETE' });
+    rc.draft = null; rc.saved = null; rc.screen = 'list';
+    await loadRecipes();
+    renderRecipes();
+  } catch (e) { rcMsg(e.message, true); }
+}
+
+// --- cook view ---------------------------------------------------------------
+
+function renderCook(host) {
+  const r = rc.saved;
+  if (!r) { rc.screen = 'list'; return renderRecipes(); }
+
+  const head = el('div', 'rc-head');
+  const back = el('button', 'rc-btn quiet', '← Back to the recipe');
+  back.addEventListener('click', () => { rc.screen = 'editor'; renderRecipes(); });
+  head.appendChild(back);
+  host.appendChild(head);
+
+  const c = el('div', 'cook');
+  c.appendChild(el('h2', null, r.name));
+  const bits = [`Serves ${r.servings}`];
+  if (r.prepMinutes) bits.push(`${r.prepMinutes} min prep`);
+  if (r.cookMinutes) bits.push(`${r.cookMinutes} min cooking`);
+  c.appendChild(el('div', 'sub', bits.join(' · ')));
+
+  // Ingredients up front, per Decision 6.
+  c.appendChild(el('h4', null, 'Ingredients'));
+  const ings = el('ul', 'ings');
+  r.ingredients.forEach((i) => {
+    const li = el('li');
+    li.appendChild(el('span', 'q', i.quantity || ''));
+    li.appendChild(el('span', null, i.name));
+    ings.appendChild(li);
+  });
+  if (!r.ingredients.length) ings.appendChild(el('li', null, 'No ingredients listed.'));
+  c.appendChild(ings);
+
+  c.appendChild(el('h4', null, 'Method'));
+  if (!r.steps.length) {
+    c.appendChild(el('div', 'rc-empty', 'No steps written yet.'));
+  } else if (rc.cookStep === null) {
+    const ol = el('ul', 'steps');
+    r.steps.forEach((s) => ol.appendChild(el('li', null, s)));
+    c.appendChild(ol);
+    const nav = el('div', 'nav');
+    const one = el('button', 'rc-btn', 'One step at a time');
+    one.addEventListener('click', () => { rc.cookStep = 0; renderRecipes(); });
+    nav.appendChild(one);
+    c.appendChild(nav);
+  } else {
+    const i = Math.min(rc.cookStep, r.steps.length - 1);
+    const box = el('div', 'one');
+    box.appendChild(el('div', 'n', `Step ${i + 1} of ${r.steps.length}`));
+    box.appendChild(el('div', 'txt', r.steps[i]));
+    c.appendChild(box);
+
+    const nav = el('div', 'nav');
+    const prev = el('button', 'rc-btn', '← Back');
+    prev.disabled = i === 0;
+    prev.addEventListener('click', () => { rc.cookStep = i - 1; renderRecipes(); });
+    const next = el('button', 'rc-btn primary', i === r.steps.length - 1 ? 'Done' : 'Next →');
+    next.addEventListener('click', () => {
+      if (i === r.steps.length - 1) rc.cookStep = null; else rc.cookStep = i + 1;
+      renderRecipes();
+    });
+    const all = el('button', 'rc-btn quiet', 'Show all steps');
+    all.addEventListener('click', () => { rc.cookStep = null; renderRecipes(); });
+    nav.appendChild(prev); nav.appendChild(next); nav.appendChild(el('span', 'spacer')); nav.appendChild(all);
+    c.appendChild(nav);
+  }
+
+  host.appendChild(c);
 }
 
 // --- the Plan tab (v3 F2) -------------------------------------------------

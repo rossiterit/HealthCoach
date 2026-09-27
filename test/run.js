@@ -2208,6 +2208,54 @@ async function serverTests() {
       assert.ok(page.includes('id="view-trend"'));
     });
 
+    await test('the page carries the Recipes tab, fifth, per Decision 1', async () => {
+      const page = (await get(port, '/')).body;
+      assert.ok(page.includes('id="tab-recipes"'));
+      assert.ok(page.includes('id="view-recipes"'));
+      const order = ['tab-chat', 'tab-stretch', 'tab-trend', 'tab-plan', 'tab-recipes'].map((id) => page.indexOf(id));
+      assert.deepStrictEqual(order, [...order].sort((a, b) => a - b), 'Chat / Stretch / Trend / Plan / Recipes');
+    });
+
+    await test('GET /api/recipes lists name, servings and per-serving calories', async () => {
+      const r = await get(port, '/api/recipes');
+      assert.strictEqual(r.status, 200);
+      const d = JSON.parse(r.body);
+      assert.ok(Array.isArray(d.recipes));
+      assert.strictEqual(d.estimate, true, 'the list says its figures are estimates');
+    });
+
+    await test('an unknown recipe 404s rather than rendering an empty editor', async () => {
+      const r = await get(port, '/api/recipes/rcp_nope');
+      assert.strictEqual(r.status, 404);
+    });
+
+    await test('a recipe cannot be saved without a name', async () => {
+      const r = await post(port, '/api/recipes', { servings: 2, ingredients: [], steps: [] });
+      assert.strictEqual(r.status, 400);
+      assert.ok(/name/i.test(r.body), r.body);
+    });
+
+    await test('the Recipes tab carries an editor, a cook view and no grading', async () => {
+      const page = (await get(port, '/')).body;
+      // Decision 7's three screens.
+      assert.ok(page.includes('rc-editor'), 'the editor');
+      assert.ok(page.includes('class="cook"') || page.includes("'cook'"), 'the cook view');
+      assert.ok(/One step at a time/.test(page), 'step-at-a-time cooking');
+      assert.ok(/Estimated from the ingredients/.test(page) || page.includes('basisNote'), 'the nutrition basis');
+      // Decision 8 — no grading language shipped in the page at all.
+      for (const banned of [/health score/i, /consider a lighter/i, /\bunhealthy\b/i, /too many calories/i]) {
+        assert.ok(!banned.test(page), `the page must not ship ${banned}`);
+      }
+    });
+
+    await test('the Recipes tab stacks rather than scrolling sideways on a phone', async () => {
+      const page = (await get(port, '/')).body;
+      // Decision 7 is phone-first: the four-column ingredient grid collapses.
+      assert.ok(/\.ing, \.ing-head \{ grid-template-columns: 1fr 1fr; \}/.test(page),
+        'ingredient rows must collapse at phone width');
+      assert.ok(/#view-recipes \{ padding: 16px; \}/.test(page), 'and the tab gets phone padding');
+    });
+
     await test('the page carries the Plan tab, fourth, per the spec tab order', async () => {
       const page = (await get(port, '/')).body;
       assert.ok(page.includes('id="tab-plan"'));
