@@ -528,6 +528,30 @@
   .confirmbtn:disabled { opacity: .5; cursor: default; }
   .confirmed { font-size: 10px; color: var(--ac-green); letter-spacing: .04em; align-self: center; }
 
+  /* --- Plan with Coach + the preview layer (v5 F2) --- */
+  .plan-coach {
+    border: 1px solid var(--line); border-radius: 3px; background: var(--paper2);
+    padding: 14px; margin-bottom: 12px; display: grid; gap: 9px;
+  }
+  .plan-coach .rc-search { margin-bottom: 0; }
+  .prop-bar {
+    display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
+    border: 1px dashed var(--ac-slate); border-radius: 3px;
+    background: #eef0f5; padding: 10px 12px; margin-bottom: 12px;
+  }
+  .prop-bar .lbl { font-size: 12px; color: var(--ink); flex: 1 1 auto; }
+  /* A proposed card is visibly NOT a card in the grid: dashed, lighter and
+     inert. That distinction has to survive a glance — it is the whole of
+     propose-then-apply as far as the eye is concerned. */
+  .card.proposed {
+    border-style: dashed; border-color: var(--ac-slate); background: #f2f4f8;
+    color: var(--ac-slate); cursor: default;
+  }
+  .card.proposed .cname { font-style: italic; }
+  .cell.hasprop { border-color: var(--ac-slate); }
+  .applyday { font-size: 10px; padding: 2px 8px; color: var(--ac-slate); }
+  .applyday:hover { color: var(--ink); }
+
   .plan-msg { font-size: 12px; color: var(--muted); min-height: 17px; }
   .plan-msg.warn { color: var(--warn-text); }
 
@@ -1701,6 +1725,160 @@ function renderCook(host) {
   host.appendChild(c);
 }
 
+/**
+ * Plan with Coach (v5 F2) — propose, look, decide.
+ *
+ * The proposal renders IN the grid so the owner can see what the week would
+ * look like, but as a distinct layer: dashed, lighter, and labelled. Nothing
+ * here writes to the plan; Apply is the only thing that does, and it is a
+ * separate press.
+ *
+ * Proposed cards are drawn from `plan.data.proposal`, which the API returns
+ * alongside — never merged into — the committed days. A card the owner has
+ * placed and a card the coach is suggesting are different things and are never
+ * in the same list.
+ */
+function coachPanel() {
+  const box = el('div', 'plan-coach');
+
+  const head = el('div', 'rc-build-head');
+  head.appendChild(el('h3', null, 'Plan with Coach'));
+  head.appendChild(el('span', 'hint', 'It suggests, you decide. Nothing goes in until you say so.'));
+  box.appendChild(head);
+
+  const row = el('div', 'searchrow');
+  const scope = el('div', 'chips');
+  scope.setAttribute('role', 'radiogroup');
+  scope.setAttribute('aria-label', 'How much to plan');
+  [['day', 'A day'], ['week', 'The week']].forEach(([id, label]) => {
+    const c = el('button', 'chip' + (plan.coach.scope === id ? ' on' : ''));
+    c.type = 'button';
+    c.setAttribute('role', 'radio');
+    c.setAttribute('aria-checked', String(plan.coach.scope === id));
+    c.textContent = label;
+    c.addEventListener('click', () => { plan.coach.scope = id; renderPlan(); });
+    scope.appendChild(c);
+  });
+  row.appendChild(scope);
+  box.appendChild(row);
+
+  if (plan.coach.scope === 'day') {
+    const days = el('div', 'chips');
+    days.setAttribute('role', 'radiogroup');
+    days.setAttribute('aria-label', 'Which day');
+    (plan.data.days || []).forEach((d) => {
+      const c = el('button', 'chip' + (plan.coach.date === d.date ? ' on' : ''));
+      c.type = 'button';
+      c.setAttribute('role', 'radio');
+      c.setAttribute('aria-checked', String(plan.coach.date === d.date));
+      c.textContent = d.short;
+      c.addEventListener('click', () => { plan.coach.date = d.date; renderPlan(); });
+      days.appendChild(c);
+    });
+    box.appendChild(days);
+  }
+
+  const mode = el('input', 'rc-search');
+  mode.placeholder = 'Any slant? e.g. low carb, high protein, quick';
+  mode.setAttribute('aria-label', 'Optional slant');
+  mode.value = plan.coach.mode;
+  mode.addEventListener('input', () => { plan.coach.mode = mode.value; });
+  box.appendChild(mode);
+
+  const foot = el('div', 'rc-foot');
+  const go = el('button', 'rc-btn primary', plan.coach.busy ? 'Thinking…' : 'Propose');
+  go.id = 'plan-propose';
+  go.disabled = plan.coach.busy || (plan.coach.scope === 'day' && !plan.coach.date);
+  go.addEventListener('click', proposeWithCoach);
+  foot.appendChild(go);
+  const cancel = el('button', 'rc-btn quiet', 'Cancel');
+  cancel.disabled = plan.coach.busy;
+  cancel.addEventListener('click', () => { plan.coach.open = false; renderPlan(); });
+  foot.appendChild(cancel);
+  box.appendChild(foot);
+
+  if (plan.coach.msg) {
+    const m = el('div', 'rc-msg' + (plan.coach.warn ? ' warn' : ''), plan.coach.msg);
+    box.appendChild(m);
+  }
+  return box;
+}
+
+async function proposeWithCoach() {
+  const c = plan.coach;
+  if (c.busy) return;
+  c.busy = true; c.warn = false;
+  c.msg = 'Working out a plan — this takes a minute.';
+  renderPlan();
+  const ask = c.scope === 'week'
+    ? `Plan my week${c.mode.trim() ? ` — ${c.mode.trim()}` : ''}.`
+    : `Plan ${dayName(c.date)}${c.mode.trim() ? ` — ${c.mode.trim()}` : ''}.`;
+  try {
+    // Routed through chat so the page and a typed request are the same act —
+    // Decision: the chat can do everything the page affordances can.
+    // planApi takes a plain payload and stringifies it itself. Passing a
+    // fetch-options object here double-wrapped the body and the server saw no
+    // message at all — the same slip silently turned "apply this day" into
+    // "apply everything", because `dates` never arrived.
+    await planApi('/chat', { message: ask });
+    c.busy = false; c.open = false; c.msg = '';
+    await loadPlan(plan.week);
+  } catch (e) {
+    c.busy = false; c.warn = true; c.msg = e.message;
+    renderPlan();
+  }
+}
+
+function dayName(date) {
+  const d = (plan.data.days || []).find((x) => x.date === date);
+  return d ? d.weekday : date;
+}
+
+/** "Just this day" — present only on days the proposal actually covers. */
+function applyDayNode(day) {
+  const p = plan.data.proposal;
+  if (!p || !p.dates.includes(day.date)) return null;
+  const b = el('button', 'rc-btn quiet applyday', 'Apply this day');
+  b.addEventListener('click', (e) => { e.stopPropagation(); applyProposal([day.date]); });
+  return b;
+}
+
+/** The banner that appears while a proposal is waiting for a decision. */
+function proposalBar() {
+  const p = plan.data.proposal;
+  const bar = el('div', 'prop-bar');
+  const n = p.dates.length;
+  bar.appendChild(el('span', 'lbl', `A suggestion for ${n === 1 ? dayName(p.dates[0]) : `${n} days`} — nothing is in your planner yet.`));
+
+  const apply = el('button', 'rc-btn primary', n === 1 ? 'Apply' : 'Apply all');
+  apply.addEventListener('click', () => applyProposal());
+  bar.appendChild(apply);
+
+  const bin = el('button', 'rc-btn quiet', 'Discard');
+  bin.addEventListener('click', () => applyProposal(null, true));
+  bar.appendChild(bin);
+  return bar;
+}
+
+async function applyProposal(dates, discard) {
+  try {
+    const out = await planApi(discard ? '/plan/discard' : '/plan/apply', {
+      week: plan.week,
+      dates: dates || undefined,
+    });
+    plan.data = { ...plan.data, ...out.plan, proposal: out.proposal, shopping: out.shopping };
+    if (out.favorites) plan.data.favorites = out.favorites;
+    renderPlan();
+    if (discard) { planMsg('Binned. Your planner is exactly as it was.'); return; }
+    const placed = (out.placed || []).length;
+    const skipped = (out.skipped || []).length;
+    planMsg(
+      `${placed} meal${placed === 1 ? '' : 's'} added.` +
+      (skipped ? ` I left ${skipped} where you had already put something.` : ''),
+    );
+  } catch (e) { planMsg(e.message, true); }
+}
+
 // --- the Plan tab (v3 F2) -------------------------------------------------
 //
 // Two ways to move a meal, both live at every width:
@@ -1720,6 +1898,9 @@ const plan = {
   data: null,      // the /api/plan payload
   results: [],     // current search results
   armed: null,     // { kind: 'food'|'entry', foodId, entryId, name }
+  // Plan with Coach (v5 F2). `data.proposal` holds the preview layer, which
+  // the API returns ALONGSIDE the committed days and never merged into them.
+  coach: { open: false, scope: 'week', date: null, mode: '', busy: false, msg: '', warn: false },
 };
 
 function planMsg(text, warn) {
@@ -1841,6 +2022,26 @@ function cardNode(card, day, slot) {
   return c;
 }
 
+/** Proposed cards for one slot, from the preview layer — never from `days`. */
+function proposedCards(date, slot) {
+  const p = plan.data.proposal;
+  if (!p || !p.days[date]) return [];
+  return p.days[date][slot] || [];
+}
+
+/**
+ * A proposed card. Deliberately inert: not draggable, no remove button, no
+ * servings control. Everything you can do to it lives on the proposal bar,
+ * because a proposal is accepted or thrown away by the day, not edited in place.
+ */
+function proposedCardNode(card) {
+  const c = el('div', 'card proposed');
+  c.setAttribute('aria-label', `Suggested: ${card.name}`);
+  c.appendChild(el('span', 'cname', card.name));
+  if (card.isRecipe && card.servings !== 1) c.appendChild(el('span', 'srv', `x${card.servings}`));
+  return c;
+}
+
 /** Drop a payload into a day slot: a move if it came from the grid, else new. */
 async function dropIntoSlot(payload, date, slot) {
   try {
@@ -1886,9 +2087,14 @@ function confirmNode(day) {
 }
 
 function cellNode(day, slot, stacked) {
-  const cell = el('div', 'cell' + (plan.armed ? ' armed' : ''));
+  const proposed = proposedCards(day.date, slot.slot);
+  const cell = el('div', 'cell' + (plan.armed ? ' armed' : '') + (proposed.length ? ' hasprop' : ''));
   if (stacked) cell.appendChild(el('div', 'slotname', slot.label));
   slot.cards.forEach((card) => cell.appendChild(cardNode(card, day, slot)));
+  // The preview layer, under anything committed and visibly not the same
+  // thing: dashed, lighter, inert. A suggestion on the glass, not a card in
+  // the grid.
+  proposed.forEach((card) => cell.appendChild(proposedCardNode(card)));
 
   cell.addEventListener('dragover', (e) => { e.preventDefault(); cell.classList.add('drop'); });
   cell.addEventListener('dragleave', () => cell.classList.remove('drop'));
@@ -1924,11 +2130,17 @@ function renderPlan() {
     b.addEventListener('click', () => loadPlan(plan.weeks[i]));
     weeks.appendChild(b);
   });
+  const coachBtn = el('button', 'rc-btn', 'Plan with Coach');
+  coachBtn.addEventListener('click', () => { plan.coach.open = !plan.coach.open; renderPlan(); });
+  head.appendChild(coachBtn);
   head.appendChild(weeks);
   host.appendChild(head);
 
   // Sunday is not a column that got hidden — it was never in the data.
   host.appendChild(el('p', 'plan-note', 'Monday to Saturday. Sunday is yours. Totals are estimates.'));
+
+  if (plan.coach.open) host.appendChild(coachPanel());
+  if (plan.data.proposal) host.appendChild(proposalBar());
 
   if (plan.armed) {
     const bar = el('div', 'arm-bar');
@@ -1952,6 +2164,8 @@ function renderPlan() {
       block.appendChild(hd);
       day.slots.forEach((slot) => block.appendChild(cellNode(day, slot, true)));
       block.appendChild(totalsNode(day.totals));
+      const dayApply = applyDayNode(day);
+      if (dayApply) { const bar = el('div', 'confirmbar'); bar.appendChild(dayApply); block.appendChild(bar); }
       const c = confirmNode(day);
       if (c) { const bar = el('div', 'confirmbar'); bar.appendChild(c); block.appendChild(bar); }
       grid.appendChild(block);
@@ -1971,6 +2185,17 @@ function renderPlan() {
     });
     grid.appendChild(el('div', 'corner'));
     d.days.forEach((day) => grid.appendChild(totalsNode(day.totals)));
+    // Apply-this-day, when a proposal covers it. Apply-per-day is the point:
+    // taking Tuesday leaves the rest of the week still on offer.
+    if (d.proposal) {
+      grid.appendChild(el('div', 'corner'));
+      d.days.forEach((day) => {
+        const bar = el('div', 'confirmbar');
+        const a = applyDayNode(day);
+        if (a) bar.appendChild(a);
+        grid.appendChild(bar);
+      });
+    }
     // The confirm row sits under the totals, one control per day.
     grid.appendChild(el('div', 'corner'));
     d.days.forEach((day) => {
