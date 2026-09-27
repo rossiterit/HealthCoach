@@ -534,6 +534,23 @@
     padding: 14px; margin-bottom: 12px; display: grid; gap: 9px;
   }
   .plan-coach .rc-search { margin-bottom: 0; }
+  /* The target line (Decision 10): the panel states which week it will plan
+     BEFORE Propose is pressed. Paper & Ink — stated, not shouted, so it reads as
+     a label on the panel rather than a warning. */
+  .plan-target {
+    font-size: 12px; color: var(--muted);
+    border-left: 2px solid var(--ac-slate); padding-left: 9px;
+  }
+  .plan-target b { font-weight: 600; color: var(--ink); }
+  /* A proposal waiting on the week that is NOT on screen. Dashed like the
+     preview cards, because it points at the same kind of thing. */
+  .plan-elsewhere {
+    display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
+    border: 1px dashed var(--ac-slate); border-radius: 3px;
+    background: #eef0f5; padding: 10px 12px; margin-bottom: 12px;
+    font-size: 12px; color: var(--ink);
+  }
+  .plan-elsewhere .lbl { flex: 1 1 auto; }
   .prop-bar {
     display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
     border: 1px dashed var(--ac-slate); border-radius: 3px;
@@ -1787,6 +1804,21 @@ function coachPanel() {
   head.appendChild(el('span', 'hint', 'It suggests, you decide. Nothing goes in until you say so.'));
   box.appendChild(head);
 
+  // Decision 10: state the target BEFORE proposing. The week on screen is the
+  // week that gets planned, and the owner should not have to infer that from the
+  // grid behind the panel.
+  const target = el('div', 'plan-target');
+  target.appendChild(document.createTextNode('Planning '));
+  target.appendChild(el('b', null, plan.data.weekLabel || weekLabel(plan.data)));
+  if (plan.coach.scope === 'day' && plan.coach.date) {
+    const d = (plan.data.days || []).find((x) => x.date === plan.coach.date);
+    if (d) {
+      target.appendChild(document.createTextNode(' — just '));
+      target.appendChild(el('b', null, `${d.weekday} ${d.dayNum} ${d.month}`));
+    }
+  }
+  box.appendChild(target);
+
   const row = el('div', 'searchrow');
   const scope = el('div', 'chips');
   scope.setAttribute('role', 'radiogroup');
@@ -1845,15 +1877,38 @@ function coachPanel() {
   return box;
 }
 
+/**
+ * Propose into the week ON SCREEN, and never go quiet about it (Decision 10).
+ *
+ * GOTK-180 lived here. The ask went out as a bare sentence with no week in it,
+ * so the coach planned the current week whatever the grid was showing; then the
+ * panel closed and cleared its own message, so a proposal that had landed on the
+ * other week left an empty grid and nothing to read.
+ *
+ * Both halves are fixed: `planWeek` (and the chosen date) travel with the
+ * request, and the panel only closes once a proposal is actually visible in this
+ * week's grid. Anything else — a failure, a timeout, or a proposal that landed on
+ * the other week — keeps the panel open with one plain line.
+ */
+const PROPOSE_TIMEOUT_MS = 240000;
+
 async function proposeWithCoach() {
   const c = plan.coach;
   if (c.busy) return;
+  const week = plan.week;
+  const dates = c.scope === 'day' && c.date ? [c.date] : undefined;
   c.busy = true; c.warn = false;
-  c.msg = 'Working out a plan — this takes a minute.';
+  c.msg = `Working out a plan for ${plan.data.weekLabel || weekLabel(plan.data)} — this takes a minute.`;
   renderPlan();
+
+  // The dates go in the sentence as well as the payload. The payload is what the
+  // server trusts; spelling the week out keeps the chat transcript readable
+  // afterwards, where "Plan Tuesday" alone was ambiguous.
+  const label = plan.data.weekLabel || weekLabel(plan.data);
   const ask = c.scope === 'week'
-    ? `Plan my week${c.mode.trim() ? ` — ${c.mode.trim()}` : ''}.`
-    : `Plan ${dayName(c.date)}${c.mode.trim() ? ` — ${c.mode.trim()}` : ''}.`;
+    ? `Plan my week — ${label}${c.mode.trim() ? ` — ${c.mode.trim()}` : ''}.`
+    : `Plan ${dayName(c.date)} ${c.date}${c.mode.trim() ? ` — ${c.mode.trim()}` : ''}.`;
+
   try {
     // Routed through chat so the page and a typed request are the same act —
     // Decision: the chat can do everything the page affordances can.
@@ -1861,11 +1916,42 @@ async function proposeWithCoach() {
     // fetch-options object here double-wrapped the body and the server saw no
     // message at all — the same slip silently turned "apply this day" into
     // "apply everything", because `dates` never arrived.
-    await planApi('/chat', { message: ask });
-    c.busy = false; c.open = false; c.msg = '';
-    await loadPlan(plan.week);
+    const out = await planApi('/chat', {
+      message: ask,
+      planWeek: week,
+      planDates: dates,
+    }, PROPOSE_TIMEOUT_MS);
+
+    // Reload the week we asked about, not whatever is current, so switching weeks
+    // mid-think cannot make the result look like it went missing.
+    await loadPlan(week);
+    c.busy = false;
+
+    if (plan.data.proposal) {
+      // It landed where it should. Close up and let the preview layer speak.
+      c.open = false; c.msg = ''; c.warn = false;
+      renderPlan();
+      return;
+    }
+
+    // Nothing to preview here. Say why, in one line, and stay open.
+    c.warn = true;
+    const elsewhere = plan.data.pendingElsewhere;
+    if (elsewhere) {
+      c.msg =
+        `The suggestion that came back is for ${elsewhere.label}, not ${label}. ` +
+        `Nothing has changed here — switch to ${elsewhere.label} to see it.`;
+    } else {
+      c.msg = (out && out.reply)
+        ? `No plan went in. ${out.reply}`
+        : `No plan came back for ${label}. Nothing has changed — try again.`;
+    }
+    renderPlan();
   } catch (e) {
-    c.busy = false; c.warn = true; c.msg = e.message;
+    c.busy = false; c.warn = true;
+    c.msg = e.name === 'AbortError'
+      ? `That took too long and I stopped waiting. Nothing has changed for ${label} — try again.`
+      : e.message;
     renderPlan();
   }
 }
@@ -1901,13 +1987,38 @@ function proposalBar() {
   return bar;
 }
 
+/**
+ * The pointer to a proposal living on the other week (Decision 10).
+ *
+ * It offers a way THERE and nothing else: no Apply, no Discard. Deciding about a
+ * week you are not looking at is exactly the surprise the week-scoped apply
+ * guard refuses on the server, and the button that skips the look would be the
+ * same mistake in the UI.
+ */
+function elsewhereBar() {
+  const p = plan.data.pendingElsewhere;
+  const bar = el('div', 'plan-elsewhere');
+  const n = p.dates.length;
+  bar.appendChild(el('span', 'lbl',
+    `A suggestion is waiting on ${p.label} — ${n === 1 ? '1 day' : `${n} days`}. Nothing is in your planner yet.`));
+  const go = el('button', 'rc-btn quiet', `Go to ${p.label}`);
+  go.addEventListener('click', () => loadPlan(p.weekStart));
+  bar.appendChild(go);
+  return bar;
+}
+
 async function applyProposal(dates, discard) {
   try {
     const out = await planApi(discard ? '/plan/discard' : '/plan/apply', {
       week: plan.week,
       dates: dates || undefined,
     });
-    plan.data = { ...plan.data, ...out.plan, proposal: out.proposal, shopping: out.shopping };
+    plan.data = {
+      ...plan.data, ...out.plan,
+      proposal: out.proposal,
+      pendingElsewhere: out.pendingElsewhere || null,
+      shopping: out.shopping,
+    };
     if (out.favorites) plan.data.favorites = out.favorites;
     renderPlan();
     if (discard) { planMsg('Binned. Your planner is exactly as it was.'); return; }
@@ -2161,11 +2272,18 @@ function planMsg(text, warn) {
   m.className = 'plan-msg' + (warn ? ' warn' : '');
 }
 
-async function planApi(path, body) {
+/**
+ * @param {number} [timeoutMs] when given, the request is abandoned after this
+ *   long and the caller sees an AbortError. Only the coach proposal passes one:
+ *   it is the single call here that waits on a model, and a hang used to leave
+ *   "Thinking…" on screen for ever with nothing to read (Decision 10).
+ */
+async function planApi(path, body, timeoutMs) {
   const res = await fetch(API + path, {
     method: body ? 'POST' : 'GET',
     headers: body ? { 'Content-Type': 'application/json' } : undefined,
     body: body ? JSON.stringify(body) : undefined,
+    signal: timeoutMs ? AbortSignal.timeout(timeoutMs) : undefined,
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || 'That did not save.');
@@ -2179,8 +2297,17 @@ function arm(what) {
   renderPlan();
 }
 
+/**
+ * Fold a mutation's response back into `plan.data`.
+ *
+ * MERGED, not replaced. `/api/plan/{assign,move,remove,pin,servings}` return the
+ * week view alone, so assigning `plan.data = d.plan` dropped every key that only
+ * `/api/plan` sends — including `proposal`. Moving one card made a waiting
+ * proposal vanish from the grid until the next full load, which Decision 10's
+ * "a pending proposal is always findable" does not allow.
+ */
 function applyPlanPayload(d) {
-  if (d.plan) plan.data = d.plan;
+  if (d.plan) plan.data = { ...plan.data, ...d.plan };
   if (d.favorites) plan.data.favorites = d.favorites;
   renderPlan();
 }
@@ -2193,6 +2320,12 @@ async function loadPlan(week) {
     plan.week = d.weekStart;
     plan.weeks = d.weeks || [];
     plan.data = d;
+    // Decision 10: the day choice offers only the displayed week's days, so a day
+    // picked before switching weeks must not survive the switch — proposing it
+    // would target a date that is no longer on screen.
+    if (plan.coach.date && !(d.days || []).some((x) => x.date === plan.coach.date)) {
+      plan.coach.date = null;
+    }
     renderPlan();
   } catch (e) {
     host.textContent = '';
@@ -2396,6 +2529,9 @@ function renderPlan() {
   if (shop.open) host.appendChild(shoppingPanel());
   if (plan.coach.open) host.appendChild(coachPanel());
   if (plan.data.proposal) host.appendChild(proposalBar());
+  // A proposal waiting on the other week is always findable (Decision 10): it
+  // shows in the grid where it lives, and this points there from here.
+  else if (plan.data.pendingElsewhere) host.appendChild(elsewhereBar());
 
   if (plan.armed) {
     const bar = el('div', 'arm-bar');

@@ -229,6 +229,10 @@ async function proposeMissingAmounts(rows, { onlyFoodIds = null, limit = 12 } = 
  */
 function proposalPayload(proposal, weekStart = null) {
   if (!proposal || proposal.resolvedAt) return null;
+  // A proposal belongs to exactly one week and is only ever previewed in that
+  // week's grid. Returning null here is correct — but on its own it is what made
+  // GOTK-180 silent, so `pendingElsewhere` below tells the page where the
+  // proposal it cannot see actually is.
   if (weekStart && proposal.weekStart !== weekStart) return null;
   const days = {};
   for (const [date, slots] of Object.entries(proposal.days || {})) {
@@ -248,6 +252,24 @@ function proposalPayload(proposal, weekStart = null) {
     }
   }
   return { id: proposal.id, weekStart: proposal.weekStart, dates: proposal.dates, mode: proposal.mode, days };
+}
+
+/**
+ * A pending proposal that lives on the OTHER week (Decision 10, GOTK-180).
+ *
+ * "Never silent" needs the page to be able to say where a proposal it is not
+ * showing has gone. Deliberately thin — the week, its label and the dates, never
+ * the cards — because this is a pointer, not a second preview layer to render.
+ */
+function pendingElsewhere(proposal, weekStart) {
+  if (!proposal || proposal.resolvedAt) return null;
+  if (!weekStart || proposal.weekStart === weekStart) return null;
+  return {
+    id: proposal.id,
+    weekStart: proposal.weekStart,
+    label: planner.weekRangeLabel(proposal.weekStart),
+    dates: proposal.dates,
+  };
 }
 
 /** The favourites board as the page renders it: eight positions, holes and all. */
@@ -309,13 +331,27 @@ async function route(req, res, url) {
     const message = typeof body.message === 'string' ? body.message.trim() : '';
     if (!message) return send(res, 400, { error: 'Send a non-empty "message".' });
 
+    // Decision 10: when the ask came from the Plan tab's Propose button, the week
+    // the grid was showing travels with it, so the coach plans what the owner was
+    // looking at. Validated against the two plannable weeks here — an unknown
+    // value is dropped rather than trusted, and a plain chat turn simply has none,
+    // which keeps "plan my week" meaning this week.
+    const weeks = planner.plannableWeeks(new Date(), cfg.timezone);
+    const planWeek = weeks.includes(body.planWeek) ? body.planWeek : null;
+    const planDates = planWeek && Array.isArray(body.planDates)
+      ? body.planDates.filter((d) => planner.weekDates(planWeek).includes(d))
+      : [];
+
     try {
-      const out = await coach.turn(store, cfg, message);
+      const out = await coach.turn(store, cfg, message, { planWeek, planDates });
       return send(res, 200, {
         reply: out.reply,
         logged: out.logged.map(publicEntry),
         corrected: out.corrected.map(publicEntry),
         goalsUpdated: out.goalsUpdated,
+        // Where a proposal this turn created actually landed, so the Plan tab can
+        // say so instead of closing on an empty grid.
+        proposalWeek: out.proposalWeek || null,
       });
     } catch (e) {
       // The message is already redacted by lib/claude.js before it gets here.
@@ -491,6 +527,12 @@ async function route(req, res, url) {
       // The preview layer (v5 F2). Separate from `days` on purpose: a client
       // reading the committed plan cannot accidentally read a proposal.
       proposal: proposalPayload(store.liveProposal(), weekStart),
+      // ...and, when the waiting proposal is for the other week, a pointer to it
+      // so the page can say so rather than showing nothing (Decision 10).
+      pendingElsewhere: pendingElsewhere(store.liveProposal(), weekStart),
+      // What this week is called, so the panel can state its target before
+      // proposing without re-deriving the phrasing client-side.
+      weekLabel: planner.weekRangeLabel(weekStart),
       weeks,
       today: localDate(new Date(), cfg.timezone),
       favorites: favoritesPayload(),
@@ -528,12 +570,32 @@ async function route(req, res, url) {
       const proposal = body.proposalId ? store.getProposal(body.proposalId) : store.liveProposal();
       if (!proposal || proposal.resolvedAt) return send(res, 409, { error: 'That proposal is no longer waiting.' });
 
+      // Decision 10: Apply, Apply-per-day and Discard act on the displayed week
+      // ONLY. A proposal for the other week is named and left alone rather than
+      // committed to a grid the owner was not looking at.
+      if (proposal.weekStart !== weekStart) {
+        return send(res, 409, {
+          error:
+            `That suggestion is for ${planner.weekRangeLabel(proposal.weekStart)}, not ` +
+            `${planner.weekRangeLabel(weekStart)}. Nothing has changed — switch to ` +
+            `${planner.weekRangeLabel(proposal.weekStart)} to deal with it.`,
+          proposalWeek: proposal.weekStart,
+        });
+      }
+
+      // Apply-per-day cannot reach outside the week either: a date from the other
+      // week would otherwise be handed to applyProposal, which guards it again.
+      if (Array.isArray(body.dates) && body.dates.some((d) => !planner.weekDates(weekStart).includes(d))) {
+        return send(res, 400, { error: `Those days are not all in ${planner.weekRangeLabel(weekStart)}.` });
+      }
+
       if (action === 'discard') {
         store.resolveProposal(proposal.id, 'discarded');
         return send(res, 200, {
           ok: true, discarded: proposal.id,
           plan: planner.view(store, cfg, weekStart),
           proposal: null,
+          pendingElsewhere: pendingElsewhere(store.liveProposal(), weekStart),
           shopping: planner.shoppingList(store, cfg, weekStart),
         });
       }
@@ -548,7 +610,11 @@ async function route(req, res, url) {
         placed: applied.placed,
         skipped: applied.skipped,
         plan: planner.view(store, cfg, weekStart),
-        proposal: proposalPayload(store.liveProposal()),
+        // Scoped to the displayed week like every other read of the preview
+        // layer. Unscoped, a partly-applied proposal from the other week would
+        // have rendered its cards into this grid.
+        proposal: proposalPayload(store.liveProposal(), weekStart),
+        pendingElsewhere: pendingElsewhere(store.liveProposal(), weekStart),
         shopping: planner.shoppingList(store, cfg, weekStart),
         favorites: favoritesPayload(),
       });

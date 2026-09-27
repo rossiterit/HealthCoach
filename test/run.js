@@ -2504,7 +2504,16 @@ async function planPlumbingTests() {
     const page = fs.readFileSync(path.join(ROOT, 'public/index.html'), 'utf8');
     const calls = page.match(/planApi\([^)]*\{[^}]*method:\s*'POST'/g) || [];
     assert.deepStrictEqual(calls, [], 'planApi must never be handed a fetch-options object');
-    assert.ok(/planApi\('\/chat', \{ message: ask \}\)/.test(page), 'propose sends a plain payload');
+    // GOTK-180 widened this payload: the propose call now carries the displayed
+    // week as well as the sentence, which is the whole fix. The shape assertion
+    // moved with it rather than being dropped — still a plain object, still no
+    // fetch options.
+    const propose = /planApi\('\/chat', \{([\s\S]*?)\}, PROPOSE_TIMEOUT_MS\)/.exec(page);
+    assert.ok(propose, 'propose sends a plain payload to /chat');
+    assert.ok(/message: ask/.test(propose[1]), 'carrying the sentence');
+    assert.ok(/planWeek: week/.test(propose[1]), 'and the week on screen — Decision 10');
+    assert.ok(/planDates: dates/.test(propose[1]), 'and the chosen day when there is one');
+    assert.ok(!/method:/.test(propose[1]), 'and nothing that looks like fetch options');
     assert.ok(/planApi\(discard \? '\/plan\/discard' : '\/plan\/apply', \{\s*week: plan\.week,\s*dates:/.test(page),
       'apply sends week and dates as a plain payload');
   });
@@ -2521,6 +2530,120 @@ async function planPlumbingTests() {
     const node = /function proposedCardNode\(card\) \{[\s\S]*?\n\}/.exec(page)[0];
     assert.ok(!/draggable/.test(node), 'not draggable');
     assert.ok(!/'cx'/.test(node), 'no remove button');
+  });
+
+  // --- Decision 10: the planner targets the week on screen (GOTK-180) -------
+  //
+  // The defect was not a crash. A proposal was built on the current week whatever
+  // the grid showed, stored there, correctly hidden by the displayed-week filter,
+  // and then the panel closed having cleared its own message. These pin the two
+  // halves — where a proposal lands, and that nothing goes quiet.
+
+  await test('propose_plan targets the displayed week, not whatever week it is today', () => {
+    const cfg = { timezone: 'America/Denver', nutrition: { engine: 'estimate' } };
+    const weeks = planner.plannableWeeks(new Date(), cfg.timezone);
+    const next = weeks[1];
+    // No `week` in the call, but the grid was showing next week. That combination
+    // is exactly what the owner did, and it used to land on weeks[0].
+    const src = fs.readFileSync(path.join(ROOT, 'lib/dietcoach.js'), 'utf8');
+    // Scoped to the propose_plan handler on purpose: create_shopping_list still
+    // defaults to this week, which is correct for it — Decision 10 is about where
+    // the PLANNER writes.
+    const handler = /if \(name === 'propose_plan'\) \{[\s\S]*?\n  \}/.exec(src)[0];
+    assert.ok(/const weekStart = targetWeek\(cfg, ctx, input\.week\)/.test(handler),
+      'the target comes from targetWeek(), not a hardcoded weeks[0]');
+    // Comments stripped first: the comment above that line NAMES the old default
+    // it replaced, and failing on an explanation would teach us to stop writing
+    // them rather than to stop shipping the bug.
+    const code = handler.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|[^:])\/\/.*$/gm, '$1 ');
+    assert.ok(!/weeks\[0\]/.test(code), 'the old current-week default must be gone from propose_plan');
+
+    // And the resolution order itself: explicit ask > displayed week > this week.
+    const dc = require(path.join(ROOT, 'lib/dietcoach.js'));
+    const block = dc.proposalBlock({ liveProposal: () => null, getPlan: () => null, data: { plans: {} } }, cfg,
+      { planWeek: next });
+    assert.ok(block.includes(`plan the week of ${next}`), 'the context names the displayed week as the target');
+    assert.ok(block.includes(next), 'and lists that week');
+    assert.ok(block.includes(weeks[0]), 'while still showing this week, so "plan my week" can resolve');
+  });
+
+  await test('with no displayed week, "plan my week" still means this week', () => {
+    const cfg = { timezone: 'America/Denver', nutrition: { engine: 'estimate' } };
+    const weeks = planner.plannableWeeks(new Date(), cfg.timezone);
+    const dc = require(path.join(ROOT, 'lib/dietcoach.js'));
+    const block = dc.proposalBlock({ liveProposal: () => null, getPlan: () => null, data: { plans: {} } }, cfg, {});
+    assert.ok(block.includes(`plan the week of ${weeks[0]}`), 'chat parity: the default is this week');
+    assert.ok(/plan next week.*mean NEXT week/i.test(block) || /"plan next week"/.test(block),
+      'and the phrasing rule is stated so next week is reachable by asking');
+  });
+
+  await test('a week is named the way the owner reads it', () => {
+    // Straddling a month needs both ends labelled; inside one does not. The month
+    // abbreviations are Intl's own ("Sept"), the same ones the grid heading
+    // already shows — this must not invent a second spelling of September.
+    assert.strictEqual(planner.weekRangeLabel('2026-10-05'), 'Mon 5 – Sat 10 Oct');
+    assert.strictEqual(planner.weekRangeLabel('2026-09-28'), 'Mon 28 Sept – Sat 3 Oct');
+  });
+
+  await test('the panel states its target before proposing', () => {
+    const page = fs.readFileSync(path.join(ROOT, 'public/index.html'), 'utf8');
+    const panel = /function coachPanel\(\) \{[\s\S]*?\n\}/.exec(page)[0];
+    assert.ok(/plan-target/.test(panel), 'the panel carries a target line');
+    assert.ok(/Planning /.test(panel), 'and it says what it will plan');
+    // Before the controls, not after the result: the owner reads it and then decides.
+    assert.ok(panel.indexOf('plan-target') < panel.indexOf('plan-propose'),
+      'the target is stated above the Propose button');
+    assert.ok(/\.plan-target \{/.test(page), 'and it is styled, not raw');
+  });
+
+  await test('the day choice offers only the displayed week, and a stale day is dropped', () => {
+    const page = fs.readFileSync(path.join(ROOT, 'public/index.html'), 'utf8');
+    // The chips are built from the loaded week's own days, so they cannot offer
+    // the other week by construction.
+    const panel = /function coachPanel\(\) \{[\s\S]*?\n\}/.exec(page)[0];
+    assert.ok(/\(plan\.data\.days \|\| \[\]\)\.forEach/.test(panel),
+      'day chips come from the displayed week');
+    // And switching weeks clears a day picked in the other one.
+    const load = /async function loadPlan\(week\) \{[\s\S]*?\n\}/.exec(page)[0];
+    assert.ok(/plan\.coach\.date = null/.test(load), 'a day from the other week does not survive the switch');
+  });
+
+  await test('propose never closes silently — it stays open with a reason', () => {
+    const page = fs.readFileSync(path.join(ROOT, 'public/index.html'), 'utf8');
+    const fn = /async function proposeWithCoach\(\) \{[\s\S]*?\n\}/.exec(page)[0];
+    // The panel may only close once a proposal is actually visible in this grid.
+    assert.ok(/if \(plan\.data\.proposal\) \{[\s\S]{0,200}c\.open = false/.test(fn),
+      'the panel closes only when there is something to see');
+    assert.ok(/pendingElsewhere/.test(fn), 'a proposal on the other week is reported, with a pointer');
+    assert.ok(/AbortError/.test(fn), 'a timeout says so rather than hanging on "Thinking…"');
+    assert.ok(/PROPOSE_TIMEOUT_MS/.test(fn), 'and there is a timeout to hit');
+    // The old unconditional close-and-clear is what made it silent.
+    assert.ok(!/c\.busy = false; c\.open = false; c\.msg = '';/.test(fn),
+      'the unconditional close-and-clear must be gone');
+  });
+
+  await test('a proposal on the other week is findable, and cannot be applied by surprise', () => {
+    const page = fs.readFileSync(path.join(ROOT, 'public/index.html'), 'utf8');
+    const bar = /function elsewhereBar\(\) \{[\s\S]*?\n\}/.exec(page);
+    assert.ok(bar, 'there is a pointer to the other week');
+    // It offers a way THERE and nothing else — deciding blind is the thing being
+    // prevented, so an Apply on this bar would defeat the point.
+    assert.ok(/loadPlan\(p\.weekStart\)/.test(bar[0]), 'and it takes you there');
+    assert.ok(!/applyProposal/.test(bar[0]), 'it offers no Apply for a week you cannot see');
+
+    const srv = fs.readFileSync(path.join(ROOT, 'server.js'), 'utf8');
+    assert.ok(/if \(proposal\.weekStart !== weekStart\) \{/.test(srv),
+      'and the server refuses an apply aimed at the wrong week');
+    assert.ok(/function pendingElsewhere\(/.test(srv), 'the pointer is served, not inferred');
+  });
+
+  await test('a mutation response does not wipe the pending proposal off the grid', () => {
+    // /api/plan/{assign,move,...} return the week view alone. Replacing plan.data
+    // with it dropped `proposal`, so moving one card hid a waiting proposal.
+    const page = fs.readFileSync(path.join(ROOT, 'public/index.html'), 'utf8');
+    const fn = /function applyPlanPayload\(d\) \{[\s\S]*?\n\}/.exec(page)[0];
+    assert.ok(/plan\.data = \{ \.\.\.plan\.data, \.\.\.d\.plan \}/.test(fn),
+      'the payload is merged, not swapped in');
   });
 
   // --- the reviewed shopping list (v5 F4, GOTK-179) ------------------------
