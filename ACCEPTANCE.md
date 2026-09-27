@@ -1,3 +1,130 @@
+# HealthCoach v4 — acceptance note
+
+**Date:** 2026-09-27 · **Epic:** GOTK-169 (Recipes release) · **Built by:** Claude Code, on the GOTK droplet
+
+*(v3's note follows below; v2's is in git history at `a3ed59b`, v1's at `08215b4`.)*
+
+## Read this first
+
+v4 is **built, merged and running.** Everything from before is untouched — your
+meals, plan, library and Kroger setup all came through.
+
+**<https://gotkapp.com/healthcoach/>** — and **hard-reload the first time
+(Ctrl+Shift+R, or ⌘+Shift+R on a Mac)**. The page changed a lot again, and a
+normal reload can serve you yesterday's copy and make a working build look
+broken.
+
+## What's new
+
+A fifth tab: **Recipes**. Full recipes — ingredients, quantities, method,
+servings — that live in the same library as everything else.
+
+- **The list** shows what you've saved: name, how many it serves, and roughly
+  what a serving comes to. Tap one to open it.
+- **The editor** has the title, a servings stepper, ingredient rows and a method
+  you can reorder. **New recipe** starts blank.
+- **Cook view** is the one to try propped against something on the counter.
+  Ingredients first, then the method — the whole list, or one step at a time
+  with Next. It's read-only on purpose: nothing to nudge out of place with a
+  wet thumb.
+- **Recipes work everywhere a meal does.** Search finds them, they pin to a
+  favourite tile, and they drag into the planner. A recipe in a day counts as
+  one serving unless you tap the little `x1` on the card and say otherwise.
+- **Paste a recipe into the chat** and say you want it kept — it gets saved and
+  turns up on the tab. Ask to **healthify** one and you get a *second* recipe,
+  linked to the first. The original is never overwritten and never will be.
+- **Ask for a shopping list** and any recipes in the week get broken into their
+  ingredients, scaled to the servings you planned, and merged with everything
+  else. "Send my list to King Soopers" carries those lines exactly as before.
+
+## Nothing here grades your food
+
+The rule holds and it's structural again, not a promise. There is no score, no
+grade, no rating, no colour meaning "bad" — no such field exists for a screen to
+render. The nutrition panel gives you numbers and says where they came from. The
+healthifier speaks when spoken to and not before.
+
+## How an ingredient's calories are worked out — you ratified this, here's how it landed
+
+Each ingredient row carries two things: **the quantity you wrote**, shown to the
+cook and never used for arithmetic, and **a number saying how many of that
+item's library servings the row is**, which is what the calorie maths multiplies.
+
+Per your steer this morning, the two now stay coupled: when you type or change a
+quantity, the coach works out the multiplier and fills it in, showing its
+reasoning ("From your quantity: 200 g against a 40 g serving"). Type over it and
+yours sticks. Where it can't compare honestly — "a splash" against "100 ml" — it
+says so rather than pretending.
+
+## How to check it
+
+1. **Hard-reload**, open **Recipes**, hit **New recipe**. Name it, set the
+   servings, add a couple of ingredients with quantities, write two steps, save.
+   Watch the multiplier fill itself in when you tab out of a quantity.
+2. **Open it and press Cook.** Read it at arm's length. Try one-step-at-a-time.
+   *How it looks is your call — see the note at the end.*
+3. **Paste a recipe into the chat** and say to keep it. Check it appears on the
+   tab with sensible quantities.
+4. **Ask it to healthify that recipe.** You should end up with **two** recipes,
+   the original untouched.
+5. **Say "swap the X for Y"** in one of them. It should revise the one recipe,
+   not make a third.
+6. **Drag a recipe into the Plan tab** and watch the day's totals. Tap the `x1`
+   and make it 2 — the totals should double.
+7. **Ask for the shopping list.** Recipes should be broken into ingredients and
+   scaled. Plan the same dish twice and check it asks for twice as much.
+8. **Try it on your phone.** The Recipes tab is where I'd most like your eye.
+
+## Two bugs worth telling you about, because both were in what you'd read
+
+Neither reached you — both were found by reading the actual numbers rather than
+trusting a green test, which is the thing worth reporting.
+
+- **A dish planned on two nights only shopped for one.** The chili planned twice
+  at two servings asked for half a pound of turkey when it needs a whole pound.
+  The number behind the maths was right the entire time — it was the line on the
+  page that was wrong, which is exactly why it nearly slipped past.
+- **The coach was guessing at a serving it couldn't see.** When drafting a recipe
+  from chat it was setting each ingredient's multiplier itself — but it has never
+  seen the library's serving size, so it was being asked for a multiple of
+  something invisible. The same "2 cans of kidney beans" came out as 2 in one
+  recipe and 6 in another, and "1 tsp olive oil" was counted as a full tablespoon.
+  Chat now derives that number the same way the editor does, with the serving in
+  front of it.
+
+## One thing for you to ratify
+
+Same shape as last time: v4's package says "zero new tools", but drafting,
+editing and healthifying recipes **from chat** is not possible without one. I
+added **one** — `save_recipe`, covering all three — rather than three separate
+ones. Store-only, same reading you ratified in September. Tenth tool; the suite
+pins the exact list, so an eleventh fails the build rather than arriving quietly.
+
+## What I couldn't do
+
+**Still no renderer on this droplet** — 956 MB of RAM, Chromium won't start.
+So as before: I ran the real page in a real DOM against a real throwaway
+instance and drove it like a user at 1280px and 390px — twenty checks at each
+width, identical results — plus the whole build-a-recipe-by-hand path at phone
+width. That proves it *works*. It cannot tell you whether it *looks* right:
+spacing, type size in the cook view, whether the ingredient rows breathe on a
+phone. **That's your click-through, and Decision 7 gives you the veto.**
+
+## Verification
+
+219 tests green on merged main. Every item went branch → throwaway instance on
+:8799 → pull request → merge → pull → restart → ticket, with a real render for
+the visual ones. PRs
+[#6](https://github.com/rossiterit/HealthCoach/pull/6),
+[#7](https://github.com/rossiterit/HealthCoach/pull/7),
+[#8](https://github.com/rossiterit/HealthCoach/pull/8) (your coupling
+refinement),
+[#9](https://github.com/rossiterit/HealthCoach/pull/9) and
+[#10](https://github.com/rossiterit/HealthCoach/pull/10). GOTK-169 and all four
+children are Done.
+
+---
+
 # HealthCoach v3 — acceptance note
 
 **Date:** 2026-09-23, amended 2026-09-26 · **Epic:** GOTK-163 (Meal Planner release) · **Built by:** Claude Code, on the GOTK droplet
