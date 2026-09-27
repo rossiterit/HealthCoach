@@ -37,6 +37,7 @@ const planner = require('./lib/planner');
 const atetoplan = require('./lib/atetoplan');
 const kroger = require('./lib/kroger');
 const recipeLib = require('./lib/recipes');
+const recipebuilder = require('./lib/recipebuilder');
 const telegram = require('./lib/telegram');
 
 const cfg = load();
@@ -531,6 +532,13 @@ async function route(req, res, url) {
     });
   }
 
+  // Build with Coach (v5 F1). This must sit ABOVE the /api/recipes/:id
+  // matcher below, which would otherwise swallow "modes" as a recipe id and
+  // 404 it — which is exactly what it did the first time.
+  if (method === 'GET' && p === '/api/recipes/modes') {
+    return send(res, 200, { modes: recipebuilder.modeList() });
+  }
+
   if (method === 'GET' && p.startsWith('/api/recipes/')) {
     const recipe = store.getRecipe(p.slice('/api/recipes/'.length));
     if (!recipe) return send(res, 404, { error: 'No such recipe.' });
@@ -563,6 +571,27 @@ async function route(req, res, url) {
       quantity: body.quantity,
     });
     return send(res, 200, { ...out, itemServing: item.quantity, foodId: item.id });
+  }
+
+  if (method === 'POST' && p === '/api/recipes/build') {
+    const body = await readJson(req);
+    const gen = await recipebuilder.generate(cfg, { dish: body.dish, mode: body.mode, note: body.note });
+    if (gen.error) return send(res, 400, { error: gen.error });
+
+    // Straight through the v4 pipeline: the same ingredient resolution, the
+    // same multiplier coupling, the same store write. A generated recipe is an
+    // ordinary draft and gets no special handling anywhere downstream.
+    const out = await resolveIngredients(gen.draft.ingredients);
+    const recipe = store.addRecipe({
+      ...gen.draft,
+      ingredients: await proposeMissingAmounts(out.ingredients),
+      source: `coach:${gen.draft.mode}`,
+    });
+    return send(res, 201, {
+      recipe: recipeLib.view(store, recipe),
+      created: out.created,
+      mode: gen.draft.mode,
+    });
   }
 
   if (method === 'POST' && p === '/api/recipes') {
