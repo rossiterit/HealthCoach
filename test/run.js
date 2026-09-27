@@ -54,6 +54,7 @@ const RATIFIED_TOOLS = [
   'log_weight',
   'log_workout',
   'save_goals',
+  'save_recipe',
   'send_list_to_kroger',
 ];
 
@@ -292,6 +293,11 @@ async function toolTests() {
     // change control, not a code review. v2's log_workout/log_weight were
     // ratified by the owner on 2026-09-12 as same-class store writes; the
     // frozen thing is external access (calendar, APIs) per Decision 8.
+    //
+    // v4 adds one more, save_recipe, on the same reading: F3 requires drafting,
+    // editing and healthifying recipes BY CHAT, none of which is possible
+    // without a store-writing tool. One tool covers all three rather than
+    // three separate ones. It is flagged in the acceptance note.
     //
     // v3 adds three on the same ratified reading — favorite_food and
     // correct_food (F1 requires pinning and correcting the library BY CHAT) and
@@ -1518,6 +1524,94 @@ async function recipeTests() {
     const out = await foods.proposeAmount(CFG, { itemName: 'oats', itemServing: '40 g', quantity: '  ' });
     assert.strictEqual(out.amount, null);
     assert.ok(/no quantity/i.test(out.reason), out.reason);
+  });
+
+  await test('save_recipe writes a new recipe and says where it went', async () => {
+    const s = new Store(tmpDir()).load();
+    s.addFood({ name: 'Ground turkey', quantity: '4 oz', nutrition: { calories_kcal: 170 } });
+    const out = await dietcoach.runTool(s, CFG, 'save_recipe', {
+      name: 'Turkey chili', servings: 6,
+      ingredients: [{ name: 'Ground turkey', quantity: '1 lb', amount: 4 }],
+      steps: ['Brown the turkey.', 'Simmer.'],
+    });
+    assert.ok(/Saved Turkey chili/i.test(out.result), out.result);
+    assert.ok(/Recipes tab/i.test(out.result), 'and says where to find it');
+    assert.strictEqual(s.allRecipes().length, 1);
+  });
+
+  await test('save_recipe with a recipe_id revises in place, never duplicating', async () => {
+    const s = new Store(tmpDir()).load();
+    s.addFood({ name: 'Kidney beans', quantity: '1 cup', nutrition: { calories_kcal: 200 } });
+    s.addFood({ name: 'Black beans', quantity: '1 cup', nutrition: { calories_kcal: 190 } });
+    const r = s.addRecipe({ name: 'Chili', servings: 4, ingredients: [{ name: 'Kidney beans' }], steps: ['Simmer.'] });
+    const out = await dietcoach.runTool(s, CFG, 'save_recipe', {
+      recipe_id: r.id, name: 'Chili', servings: 4,
+      ingredients: [{ name: 'Black beans', quantity: '2 cans' }], steps: ['Simmer.'],
+    });
+    assert.ok(/Updated/i.test(out.result), out.result);
+    assert.strictEqual(s.allRecipes().length, 1, 'an edit must not leave a second copy');
+    assert.strictEqual(s.getRecipe(r.id).ingredients[0].name, 'Black beans');
+  });
+
+  await test('healthifying writes a separate recipe and leaves the original alone', async () => {
+    // Decision 3, through the tool the coach actually calls.
+    const s = new Store(tmpDir()).load();
+    s.addFood({ name: 'Ground turkey', quantity: '4 oz', nutrition: { calories_kcal: 170 } });
+    const r = s.addRecipe({ name: 'Chili', servings: 4, ingredients: [{ name: 'Ground turkey' }], steps: ['Cook.'] });
+    const out = await dietcoach.runTool(s, CFG, 'save_recipe', {
+      healthified_from: r.id, name: 'Chili, lighter', servings: 4,
+      ingredients: [{ name: 'Ground turkey', quantity: '1 lb' }], steps: ['Cook.'],
+      healthify_note: 'Leaner mince.',
+    });
+    assert.ok(/separate recipe/i.test(out.result), out.result);
+    assert.ok(/untouched/i.test(out.result), 'and says the original survived');
+    assert.strictEqual(s.allRecipes().length, 2);
+    const original = s.getRecipe(r.id);
+    assert.strictEqual(original.name, 'Chili');
+    assert.strictEqual(original.healthifiedFrom, null);
+    const copy = s.allRecipes().find((x) => x.id !== r.id);
+    assert.strictEqual(copy.healthifiedFrom, r.id);
+  });
+
+  await test('an unknown recipe id is reported, not silently turned into a new recipe', async () => {
+    const s = new Store(tmpDir()).load();
+    const out = await dietcoach.runTool(s, CFG, 'save_recipe', { recipe_id: 'rcp_nope', name: 'x' });
+    assert.ok(/No recipe with id/i.test(out.result), out.result);
+    assert.strictEqual(s.allRecipes().length, 0);
+  });
+
+  await test('the recipe book reaches the coach with ids and no calorie commentary', () => {
+    const s = new Store(tmpDir()).load();
+    const r = s.addRecipe({ name: 'Chili', servings: 6, ingredients: [{ name: 'beans' }] });
+    const copy = s.addRecipe({ name: 'Chili, lighter', servings: 6, healthifiedFrom: r.id });
+    const block = dietcoach.recipeBlock(s);
+    assert.ok(block.includes(r.id), 'ids must be present or the coach will revise the wrong dish');
+    assert.ok(/a healthified version of Chili/.test(block), 'copies are shown against their original');
+    // Decision 8: no figures here, so there is nothing to comment on unprompted.
+    assert.ok(!/kcal|calorie|protein/i.test(block), block);
+    assert.ok(copy.healthifiedFrom === r.id);
+  });
+
+  await test('an empty recipe book invites saving without nagging', () => {
+    const block = dietcoach.recipeBlock(new Store(tmpDir()).load());
+    assert.ok(/empty/i.test(block));
+    assert.ok(!/should|remember to|why not/i.test(block), block);
+  });
+
+  await test('the coach is told it cannot open links, and must not pretend to', () => {
+    // v4 excludes URL fetching: pasted text only, no external access.
+    const p = dietcoach.persona(new Store(tmpDir()).load());
+    assert.ok(/cannot open pages/i.test(p), 'the refusal must be in the prompt');
+    assert.ok(/never pretend to have read one/i.test(p));
+    // And there is still no tool that could fetch one.
+    assert.ok(!coach.allTools().some((t) => /url|fetch|http|link|browse/i.test(t.name)));
+  });
+
+  await test('the coach is told never to grade a recipe, and to keep healthify on request', () => {
+    const p = dietcoach.persona(new Store(tmpDir()).load());
+    assert.ok(/Never grade a recipe/i.test(p));
+    assert.ok(/Only when asked/i.test(p), 'the healthifier speaks when spoken to');
+    assert.ok(/Never overwrite the original/i.test(p));
   });
 
   await test('a v3 store gains the recipes table with nothing migrated', () => {
