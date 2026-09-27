@@ -180,6 +180,44 @@ async function resolveIngredients(list) {
   return { ingredients: out, created };
 }
 
+/**
+ * Couple quantity and multiplier on a first save.
+ *
+ * The editor proposes a multiplier whenever the quantity changes, but a row
+ * whose ingredient was only just created by create-on-miss had nothing to
+ * propose against at the time — which is every row of a hand-built recipe, the
+ * case where this matters most. So rows that still sit at the default 1 while
+ * carrying real quantity text get one proposal here, now that the library item
+ * exists. A row the owner set deliberately is left alone.
+ *
+ * Bounded: only untouched rows, and never more than a dozen proposals for one
+ * save, so a long recipe cannot turn into a long wait.
+ */
+async function proposeMissingAmounts(rows, { onlyFoodIds = null, limit = 12 } = {}) {
+  let spent = 0;
+  const out = [];
+  for (const row of rows) {
+    const item = row.foodId ? store.getFood(row.foodId) : null;
+    const untouched = Number(row.amount) === 1 || row.amount === undefined || row.amount === null;
+    // On an edit, only rows whose ingredient was just created are eligible:
+    // an existing row sitting at 1 may well be a deliberate single serving,
+    // and silently changing it would be worse than leaving it alone.
+    const eligible = !onlyFoodIds || onlyFoodIds.has(row.foodId);
+    if (!item || !untouched || !eligible || !String(row.quantity || '').trim() || spent >= limit) {
+      out.push(row);
+      continue;
+    }
+    spent += 1;
+    const p = await foods.proposeAmount(cfg, {
+      itemName: item.name,
+      itemServing: item.quantity,
+      quantity: row.quantity,
+    });
+    out.push(p.amount ? { ...row, amount: p.amount } : row);
+  }
+  return out;
+}
+
 /** The favourites board as the page renders it: eight positions, holes and all. */
 function favoritesPayload() {
   return store.favorites().map((id, slot) => (id ? foods.publicFood(store.libraryItem(id), slot) : null));
@@ -502,11 +540,31 @@ async function route(req, res, url) {
     });
   }
 
+  // Propose the serving multiplier for one ingredient row from its quantity
+  // text (owner refinement 2026-09-27: the two stay coupled by default, and the
+  // owner can override). Search only — it never creates a library item, so
+  // typing in the editor cannot fill the library with half-finished names.
+  if (method === 'POST' && p === '/api/recipes/amount') {
+    const body = await readJson(req);
+    const name = String(body.name || '').trim();
+    if (!name) return send(res, 400, { error: 'Which ingredient?' });
+    const item = body.foodId ? store.getFood(body.foodId) : foods.search(store, name, { limit: 1 }).exact;
+    if (!item || item.kind === 'recipe') {
+      return send(res, 200, { amount: null, reason: 'not in your library yet' });
+    }
+    const out = await foods.proposeAmount(cfg, {
+      itemName: item.name,
+      itemServing: item.quantity,
+      quantity: body.quantity,
+    });
+    return send(res, 200, { ...out, itemServing: item.quantity, foodId: item.id });
+  }
+
   if (method === 'POST' && p === '/api/recipes') {
     const body = await readJson(req);
     if (!String(body.name || '').trim()) return send(res, 400, { error: 'A recipe needs a name.' });
     const out = await resolveIngredients(body.ingredients);
-    const recipe = store.addRecipe({ ...body, ingredients: out.ingredients });
+    const recipe = store.addRecipe({ ...body, ingredients: await proposeMissingAmounts(out.ingredients) });
     return send(res, 201, { recipe: recipeLib.view(store, recipe), created: out.created });
   }
 
@@ -518,8 +576,10 @@ async function route(req, res, url) {
     let created = [];
     if (body.ingredients !== undefined) {
       const out = await resolveIngredients(body.ingredients);
-      patch.ingredients = out.ingredients;
       created = out.created;
+      patch.ingredients = await proposeMissingAmounts(out.ingredients, {
+        onlyFoodIds: new Set(created.map((c) => c.id)),
+      });
     }
     // Neither is editable: the link from a healthified copy to its original is
     // what makes "the healthifier never overwrites" checkable afterwards.
