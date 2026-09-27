@@ -451,6 +451,9 @@ async function route(req, res, url) {
     const weekStart = weeks.includes(asked) ? asked : weeks[0];
     return send(res, 200, {
       ...planner.view(store, cfg, weekStart),
+      // The week's buying list, recipes expanded and scaled (v4 F4). The Kroger
+      // handoff consumes exactly these lines — no new external behaviour.
+      shopping: planner.shoppingList(store, cfg, weekStart),
       weeks,
       today: localDate(new Date(), cfg.timezone),
       favorites: favoritesPayload(),
@@ -486,6 +489,8 @@ async function route(req, res, url) {
     else if (action === 'move') out = planner.move(store, weekStart, body.entryId, body);
     else if (action === 'remove') out = planner.remove(store, weekStart, body.entryId);
     else if (action === 'pin') out = planner.pinFromSlot(store, weekStart, body.entryId, body.slot ?? null);
+    // v4 Decision 4: a slotted recipe is one serving unless set otherwise.
+    else if (action === 'servings') out = planner.setServings(store, weekStart, body.entryId, body.servings);
     else return send(res, 404, { error: 'No such endpoint.' });
 
     if (out.error === 'board full') {
