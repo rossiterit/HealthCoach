@@ -219,6 +219,36 @@ async function proposeMissingAmounts(rows, { onlyFoodIds = null, limit = 12 } = 
   return out;
 }
 
+/**
+ * A live proposal, shaped for the preview layer (v5 F2).
+ *
+ * Returned alongside the committed plan but never merged into it — the page
+ * renders these cards distinctly and they carry `proposed: true` so no client
+ * can mistake one for a card that is actually in the grid.
+ */
+function proposalPayload(proposal, weekStart = null) {
+  if (!proposal || proposal.resolvedAt) return null;
+  if (weekStart && proposal.weekStart !== weekStart) return null;
+  const days = {};
+  for (const [date, slots] of Object.entries(proposal.days || {})) {
+    days[date] = {};
+    for (const [slot, cards] of Object.entries(slots)) {
+      days[date][slot] = (cards || []).map((c) => {
+        const item = store.libraryItem(c.foodId);
+        const servings = item && item.kind === 'recipe' ? planner.servingsOf({ servings: c.servings }) : 1;
+        return {
+          foodId: c.foodId,
+          name: item ? item.name : c.name,
+          isRecipe: Boolean(item && item.kind === 'recipe'),
+          servings,
+          proposed: true,
+        };
+      });
+    }
+  }
+  return { id: proposal.id, weekStart: proposal.weekStart, dates: proposal.dates, mode: proposal.mode, days };
+}
+
 /** The favourites board as the page renders it: eight positions, holes and all. */
 function favoritesPayload() {
   return store.favorites().map((id, slot) => (id ? foods.publicFood(store.libraryItem(id), slot) : null));
@@ -257,6 +287,7 @@ async function route(req, res, url) {
         favorites: store.favorites().filter(Boolean).length,
         plans: Object.keys(store.data.plans).length,
         recipes: store.data.recipes.length,
+        proposals: store.data.proposals.filter((x) => !x.resolvedAt).length,
       },
       nutritionEngine: cfg.nutrition.engine,
       briefing: { enabled: cfg.briefing.enabled, time: cfg.briefing.time, timezone: cfg.briefing.timezone },
@@ -455,6 +486,9 @@ async function route(req, res, url) {
       // The week's buying list, recipes expanded and scaled (v4 F4). The Kroger
       // handoff consumes exactly these lines — no new external behaviour.
       shopping: planner.shoppingList(store, cfg, weekStart),
+      // The preview layer (v5 F2). Separate from `days` on purpose: a client
+      // reading the committed plan cannot accidentally read a proposal.
+      proposal: proposalPayload(store.liveProposal(), weekStart),
       weeks,
       today: localDate(new Date(), cfg.timezone),
       favorites: favoritesPayload(),
@@ -482,6 +516,39 @@ async function route(req, res, url) {
         skipped: out.skipped,
         message: atetoplan.echo(out),
         plan: planner.view(store, cfg, weekStart),
+      });
+    }
+
+    // Apply or discard a proposal (v5 F3). The ONLY route that moves a
+    // proposed card into the committed grid, and it exists only because the
+    // owner pressed something.
+    if (action === 'apply' || action === 'discard') {
+      const proposal = body.proposalId ? store.getProposal(body.proposalId) : store.liveProposal();
+      if (!proposal || proposal.resolvedAt) return send(res, 409, { error: 'That proposal is no longer waiting.' });
+
+      if (action === 'discard') {
+        store.resolveProposal(proposal.id, 'discarded');
+        return send(res, 200, {
+          ok: true, discarded: proposal.id,
+          plan: planner.view(store, cfg, weekStart),
+          proposal: null,
+          shopping: planner.shoppingList(store, cfg, weekStart),
+        });
+      }
+
+      const applied = planner.applyProposal(store, proposal, { dates: body.dates });
+      // Apply-per-day: the days taken drop out of the preview and the rest
+      // stay on offer. The proposal resolves itself when nothing is left.
+      const taken = body.dates && body.dates.length ? body.dates : proposal.dates;
+      store.markProposalDaysApplied(proposal.id, taken);
+      return send(res, 200, {
+        ok: true,
+        placed: applied.placed,
+        skipped: applied.skipped,
+        plan: planner.view(store, cfg, weekStart),
+        proposal: proposalPayload(store.liveProposal()),
+        shopping: planner.shoppingList(store, cfg, weekStart),
+        favorites: favoritesPayload(),
       });
     }
 
