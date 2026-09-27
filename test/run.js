@@ -49,6 +49,7 @@ let passed = 0;
 // governance act, not a refactor: it belongs in an acceptance note and in front
 // of the owner. See the governance test for the reasoning behind each addition.
 const RATIFIED_TOOLS = [
+  'apply_plan_proposal',
   'confirm_ate_to_plan',
   'correct_food',
   'correct_meal',
@@ -57,6 +58,7 @@ const RATIFIED_TOOLS = [
   'log_meal',
   'log_weight',
   'log_workout',
+  'propose_plan',
   'save_goals',
   'save_recipe',
   'send_list_to_kroger',
@@ -297,6 +299,17 @@ async function toolTests() {
     // change control, not a code review. v2's log_workout/log_weight were
     // ratified by the owner on 2026-09-12 as same-class store writes; the
     // frozen thing is external access (calendar, APIs) per Decision 8.
+    //
+    // v5 adds TWO, both store-only and both pre-ratified by the owner in the
+    // v5 build package (Decision 7), which says any new tools are plan
+    // proposal/apply plumbing and instructs the builder to update this pin
+    // deliberately and name each addition in the acceptance note:
+    //   propose_plan        — writes a DRAFT to `proposals`, never to `plans`.
+    //                         Nothing it does can reach the committed grid.
+    //   apply_plan_proposal — copies an accepted proposal into `plans`, or
+    //                         discards it. The only path from proposed to
+    //                         committed, and it runs only when the owner says.
+    // Neither reaches outside the app; the external surface is unchanged.
     //
     // v4 adds one more, save_recipe, on the same reading: F3 requires drafting,
     // editing and healthifying recipes BY CHAT, none of which is possible
@@ -2168,6 +2181,309 @@ async function recipeBuilderTests() {
 }
 
 // ---------------------------------------------------------------------------
+// plan plumbing — proposals, apply, discard (v5 F3, GOTK-178)
+// ---------------------------------------------------------------------------
+
+async function planPlumbingTests() {
+  const WEEK = '2026-09-21';
+
+  function stocked() {
+    const s = new Store(tmpDir()).load();
+    const oats = s.addFood({ name: 'Oats', quantity: '40 g', nutrition: { calories_kcal: 150 } });
+    const soup = s.addFood({ name: 'Soup', quantity: '1 bowl', nutrition: { calories_kcal: 200 } });
+    const chili = s.addRecipe({
+      name: 'Chili', servings: 4,
+      ingredients: [{ foodId: soup.id, name: 'Soup', quantity: '1 can', amount: 1 }],
+      steps: ['Cook.'],
+    });
+    return { s, oats, soup, chili };
+  }
+
+  await test('a proposal lives in its own table, never in the plan', () => {
+    // The structural half of propose-then-apply: reading a week cannot
+    // accidentally read a proposal, because the proposal is not in there.
+    const { s, oats } = stocked();
+    s.addProposal({
+      weekStart: WEEK, dates: ['2026-09-22'],
+      days: { '2026-09-22': { lunch: [{ foodId: oats.id, name: 'Oats' }] } },
+    });
+    assert.strictEqual(s.data.proposals.length, 1);
+    assert.strictEqual(Object.keys(s.data.plans).length, 0, 'nothing may be written to plans by proposing');
+    const v = planner.view(s, CFG, WEEK);
+    assert.ok(v.empty, 'and the grid must still read as empty');
+    assert.ok(!JSON.stringify(v).includes('Oats'), 'a proposed card must not appear in the committed view');
+  });
+
+  await test('a proposal survives a restart — the store is the state', async () => {
+    // F3: a restart mid-decision loses nothing.
+    const dir = tmpDir();
+    const a = new Store(dir).load();
+    const oats = a.addFood({ name: 'Oats', nutrition: { calories_kcal: 150 } });
+    const p = a.addProposal({ weekStart: WEEK, dates: ['2026-09-22'], days: { '2026-09-22': { lunch: [{ foodId: oats.id, name: 'Oats' }] } } });
+    // save() queues onto a write chain; awaiting it is the difference between
+    // testing persistence and testing timing.
+    await a.save();
+
+    const b = new Store(dir).load(); // as if the service had bounced
+    const live = b.liveProposal();
+    assert.ok(live, 'the proposal must come back');
+    assert.strictEqual(live.id, p.id);
+    assert.strictEqual(live.days['2026-09-22'].lunch[0].name, 'Oats');
+    // ...and applying afterwards still works.
+    const out = planner.applyProposal(b, live);
+    assert.strictEqual(out.placed.length, 1);
+  });
+
+  await test('only one proposal is ever live; a new one supersedes rather than stacks', () => {
+    const { s, oats } = stocked();
+    const a = s.addProposal({ weekStart: WEEK, dates: ['2026-09-22'], days: {} });
+    const b = s.addProposal({ weekStart: WEEK, dates: ['2026-09-23'], days: {} });
+    assert.strictEqual(s.liveProposal().id, b.id);
+    assert.strictEqual(s.getProposal(a.id).resolution, 'superseded', 'the old one is marked, not silently dropped');
+    assert.ok(oats);
+  });
+
+  await test('applying commits exactly the proposal and nothing else', () => {
+    const { s, oats, soup } = stocked();
+    const p = s.addProposal({
+      weekStart: WEEK, dates: ['2026-09-22'],
+      days: { '2026-09-22': { breakfast: [{ foodId: oats.id, name: 'Oats' }], lunch: [{ foodId: soup.id, name: 'Soup' }] } },
+    });
+    const out = planner.applyProposal(s, p);
+    assert.strictEqual(out.placed.length, 2);
+    const tue = planner.view(s, CFG, WEEK).days.find((d) => d.date === '2026-09-22');
+    assert.deepStrictEqual(tue.slots.find((x) => x.slot === 'breakfast').cards.map((c) => c.name), ['Oats']);
+    assert.deepStrictEqual(tue.slots.find((x) => x.slot === 'lunch').cards.map((c) => c.name), ['Soup']);
+    // Nothing else in the week moved.
+    const others = planner.view(s, CFG, WEEK).days.filter((d) => d.date !== '2026-09-22');
+    assert.ok(others.every((d) => d.slots.every((sl) => !sl.cards.length)), 'no other day may be touched');
+  });
+
+  await test('discarding leaves the grid exactly as it was', () => {
+    const { s, oats } = stocked();
+    planner.assign(s, WEEK, { date: '2026-09-21', slot: 'dinner', foodId: oats.id });
+    const before = JSON.stringify(planner.view(s, CFG, WEEK));
+    const p = s.addProposal({ weekStart: WEEK, dates: ['2026-09-22'], days: { '2026-09-22': { lunch: [{ foodId: oats.id, name: 'Oats' }] } } });
+    s.resolveProposal(p.id, 'discarded');
+    assert.strictEqual(JSON.stringify(planner.view(s, CFG, WEEK)), before, 'discard must change nothing');
+    assert.strictEqual(s.liveProposal(), null);
+  });
+
+  await test('an owner-placed card is never overwritten, and the collision is reported', () => {
+    // Decision 3. Checked at apply time as well as offered at propose time,
+    // because the owner may fill a slot after the proposal was drafted.
+    const { s, oats, soup } = stocked();
+    planner.assign(s, WEEK, { date: '2026-09-22', slot: 'lunch', foodId: oats.id });
+    const p = s.addProposal({
+      weekStart: WEEK, dates: ['2026-09-22'],
+      days: { '2026-09-22': { lunch: [{ foodId: soup.id, name: 'Soup' }], dinner: [{ foodId: soup.id, name: 'Soup' }] } },
+    });
+    const out = planner.applyProposal(s, p);
+    assert.deepStrictEqual(out.placed.map((x) => x.slot), ['dinner'], 'only the free slot is filled');
+    assert.strictEqual(out.skipped.length, 1);
+    assert.ok(/already put something there/i.test(out.skipped[0].why), out.skipped[0].why);
+    const tue = planner.view(s, CFG, WEEK).days.find((d) => d.date === '2026-09-22');
+    assert.deepStrictEqual(tue.slots.find((x) => x.slot === 'lunch').cards.map((c) => c.name), ['Oats'],
+      "the owner's card is still theirs");
+  });
+
+  await test('open slots exclude anything the owner has filled', () => {
+    const { s, oats } = stocked();
+    assert.strictEqual(planner.openSlots(s, WEEK).length, 24, 'six days, four slots');
+    planner.assign(s, WEEK, { date: '2026-09-21', slot: 'dinner', foodId: oats.id });
+    assert.strictEqual(planner.openSlots(s, WEEK).length, 23);
+    assert.ok(!planner.openSlots(s, WEEK).some((o) => o.date === '2026-09-21' && o.slot === 'dinner'));
+    // And never a Sunday, at any point.
+    assert.ok(!planner.openSlots(s, WEEK).some((o) => planner.isSunday(o.date)));
+  });
+
+  await test('Sunday cannot be applied even if a proposal somehow names it', () => {
+    // Proposing refuses it; this is the second refusal, at the write.
+    const { s, oats } = stocked();
+    const p = s.addProposal({
+      weekStart: WEEK, dates: ['2026-09-27'],
+      days: { '2026-09-27': { dinner: [{ foodId: oats.id, name: 'Oats' }] } },
+    });
+    const out = planner.applyProposal(s, p);
+    assert.strictEqual(out.placed.length, 0);
+    assert.ok(/not a planned day/i.test(out.skipped[0].why), out.skipped[0].why);
+  });
+
+  await test('applying one day leaves the REST still on offer', () => {
+    // Apply-per-day. The first version resolved the whole proposal the moment
+    // one day was taken, which made the remaining days unreachable — found by
+    // applying a single day against a live instance, not by a unit test.
+    const { s, oats } = stocked();
+    const p = s.addProposal({
+      weekStart: WEEK, dates: ['2026-09-22', '2026-09-23', '2026-09-24'],
+      days: {
+        '2026-09-22': { lunch: [{ foodId: oats.id, name: 'Oats' }] },
+        '2026-09-23': { lunch: [{ foodId: oats.id, name: 'Oats' }] },
+        '2026-09-24': { lunch: [{ foodId: oats.id, name: 'Oats' }] },
+      },
+    });
+    planner.applyProposal(s, p, { dates: ['2026-09-22'] });
+    s.markProposalDaysApplied(p.id, ['2026-09-22']);
+
+    const live = s.liveProposal();
+    assert.ok(live, 'the proposal must still be waiting');
+    assert.deepStrictEqual(live.dates, ['2026-09-23', '2026-09-24'], 'minus the day just taken');
+    assert.ok(!live.days['2026-09-22'], 'and the applied day leaves the preview');
+
+    // Taking the rest finishes it off.
+    planner.applyProposal(s, live, { dates: ['2026-09-23', '2026-09-24'] });
+    s.markProposalDaysApplied(p.id, ['2026-09-23', '2026-09-24']);
+    assert.strictEqual(s.liveProposal(), null, 'nothing left to decide');
+    assert.strictEqual(s.getProposal(p.id).resolution, 'applied');
+  });
+
+  await test('applying one day of a week proposal commits only that day', () => {
+    const { s, oats } = stocked();
+    const p = s.addProposal({
+      weekStart: WEEK, dates: ['2026-09-22', '2026-09-23'],
+      days: {
+        '2026-09-22': { lunch: [{ foodId: oats.id, name: 'Oats' }] },
+        '2026-09-23': { lunch: [{ foodId: oats.id, name: 'Oats' }] },
+      },
+    });
+    const out = planner.applyProposal(s, p, { dates: ['2026-09-22'] });
+    assert.strictEqual(out.placed.length, 1);
+    const v = planner.view(s, CFG, WEEK);
+    assert.strictEqual(v.days.find((d) => d.date === '2026-09-22').slots.find((x) => x.slot === 'lunch').cards.length, 1);
+    assert.strictEqual(v.days.find((d) => d.date === '2026-09-23').slots.find((x) => x.slot === 'lunch').cards.length, 0,
+      'the day they did not accept stays out of the grid');
+  });
+
+  await test('a slotted recipe in a proposal keeps its servings through apply', () => {
+    // v4 leftover-awareness has to survive the coach placing the card.
+    const { s, chili } = stocked();
+    const p = s.addProposal({
+      weekStart: WEEK, dates: ['2026-09-22'],
+      days: { '2026-09-22': { dinner: [{ foodId: chili.id, name: 'Chili', servings: 2 }] } },
+    });
+    planner.applyProposal(s, p);
+    const card = planner.view(s, CFG, WEEK).days.find((d) => d.date === '2026-09-22')
+      .slots.find((x) => x.slot === 'dinner').cards[0];
+    assert.strictEqual(card.isRecipe, true);
+    assert.strictEqual(card.servings, 2);
+  });
+
+  await test('the two new tools are store-only and reach nothing outside', () => {
+    // Pre-ratified by Decision 7 as plan plumbing. Named here so the addition
+    // is auditable from the test rather than only from a commit message.
+    const names = coach.allTools().map((t) => t.name);
+    assert.ok(names.includes('propose_plan'));
+    assert.ok(names.includes('apply_plan_proposal'));
+    const src = fs.readFileSync(path.join(ROOT, 'lib/planner.js'), 'utf8');
+    for (const forbidden of ['fetcher', 'kroger', 'https', 'http']) {
+      assert.ok(!new RegExp(`require\\(['"]\\./${forbidden}['"]\\)`).test(src),
+        `planner must not require ${forbidden}`);
+    }
+    // The external surface is unchanged by v5.
+    const outward = names.filter((n) => /kroger|import_recipe/.test(n));
+    assert.deepStrictEqual(outward.sort(), ['import_recipe_from_url', 'send_list_to_kroger']);
+  });
+
+  await test('propose_plan writes a proposal and commits nothing', async () => {
+    const { s, oats } = stocked();
+    // The live plannable week, not a fixed date: plannableWeeks rolls forward
+    // on a Sunday, so a hard-coded week makes this pass six days in seven.
+    const week = planner.plannableWeeks(new Date(), CFG.timezone)[0];
+    const day = planner.weekDates(week)[1];
+    const out = await dietcoach.runTool(s, CFG, 'propose_plan', {
+      week,
+      days: [{ date: day, slot: 'lunch', name: 'Oats' }],
+    });
+    assert.ok(out.proposalId, out.result);
+    assert.ok(/nothing is in your planner yet/i.test(out.result), out.result);
+    assert.strictEqual(Object.keys(s.data.plans).length, 0, 'proposing must not touch the plan');
+    assert.ok(oats);
+  });
+
+  await test('propose_plan refuses Sunday and taken slots, and says what it left', async () => {
+    const { s, oats } = stocked();
+    const week = planner.plannableWeeks(new Date(), CFG.timezone)[0];
+    const [, taken, free] = planner.weekDates(week);
+    const sunday = planner.addDays(week, 6);
+    assert.ok(planner.isSunday(sunday), 'the seventh day is the free day');
+    planner.assign(s, week, { date: taken, slot: 'lunch', foodId: oats.id });
+    const out = await dietcoach.runTool(s, CFG, 'propose_plan', {
+      week,
+      days: [
+        { date: taken, slot: 'lunch', name: 'Oats' },      // already theirs
+        { date: sunday, slot: 'dinner', name: 'Oats' },    // the free day
+        { date: free, slot: 'dinner', name: 'Oats' },      // fine
+      ],
+    });
+    assert.ok(/I left alone/i.test(out.result), out.result);
+    const live = s.liveProposal();
+    assert.deepStrictEqual(live.dates, [free], 'only the usable day is proposed');
+  });
+
+  await test('apply_plan_proposal applies only when told, and discard is clean', async () => {
+    const { s } = stocked();
+    const week = planner.plannableWeeks(new Date(), CFG.timezone)[0];
+    const day = planner.weekDates(week)[2];
+    await dietcoach.runTool(s, CFG, 'propose_plan', { week, days: [{ date: day, slot: 'dinner', name: 'Oats' }] });
+    const applied = await dietcoach.runTool(s, CFG, 'apply_plan_proposal', { action: 'apply' });
+    assert.ok(/In it goes/i.test(applied.result), applied.result);
+    assert.ok(applied.planChanged);
+    assert.strictEqual(s.liveProposal(), null, 'an applied proposal is no longer waiting');
+
+    // Nothing waiting: the tool says so rather than inventing one.
+    const none = await dietcoach.runTool(s, CFG, 'apply_plan_proposal', { action: 'apply' });
+    assert.ok(/no proposal waiting/i.test(none.result), none.result);
+  });
+
+  await test('the coach is told it proposes and the owner decides', () => {
+    const p = dietcoach.persona(new Store(tmpDir()).load());
+    assert.ok(/You PROPOSE, they DECIDE/i.test(p));
+    assert.ok(/never apply a proposal on your own/i.test(p));
+    assert.ok(/Sunday is never planned/i.test(p));
+    assert.ok(/NO SCORES, NO COMPARISONS/i.test(p));
+    assert.ok(/Plan around what is already there/i.test(p));
+  });
+
+  await test('the planning context lists free slots and never offers Sunday', () => {
+    const { s, oats } = stocked();
+    const now = new Date();
+    const weekStart = planner.plannableWeeks(now, CFG.timezone)[0];
+    const date = planner.weekDates(weekStart)[1];
+    planner.assign(s, weekStart, { date, slot: 'dinner', foodId: oats.id });
+    const block = dietcoach.proposalBlock(s, CFG);
+    assert.ok(/Sunday is the free day and is never planned/i.test(block));
+    assert.ok(/propose only into these/i.test(block));
+    assert.ok(!/^\s+Sunday /m.test(block), 'Sunday must not be listed as a day with free slots');
+    // The filled slot is not offered.
+    const line = block.split('\n').find((l) => l.includes(date));
+    assert.ok(line && !/Dinner/.test(line), line);
+  });
+
+  await test('a waiting proposal is flagged so the coach does not draft over it', () => {
+    const { s, oats } = stocked();
+    const weekStart = planner.plannableWeeks(new Date(), CFG.timezone)[0];
+    s.addProposal({ weekStart, dates: [planner.weekDates(weekStart)[1]], days: {} });
+    const block = dietcoach.proposalBlock(s, CFG);
+    assert.ok(/A PROPOSAL IS WAITING/i.test(block), block.slice(-200));
+    assert.ok(/Do not draft another over it/i.test(block));
+    assert.ok(oats);
+  });
+
+  await test('a proposal carries no scores, totals or comparisons', () => {
+    // Decision 5, by shape: there is no field a preview could render as a verdict.
+    const { s, oats } = stocked();
+    const p = s.addProposal({
+      weekStart: WEEK, dates: ['2026-09-22'],
+      days: { '2026-09-22': { lunch: [{ foodId: oats.id, name: 'Oats' }] } },
+    });
+    const json = JSON.stringify(p);
+    for (const banned of ['score', 'grade', 'rating', 'total', 'comparison', 'lastWeek', 'verdict', 'calories']) {
+      assert.ok(!new RegExp(`"${banned}`, 'i').test(json), `a proposal must carry no "${banned}" field`);
+    }
+  });
+}
+
+// ---------------------------------------------------------------------------
 // the stretch routine (GOTK-159)
 // ---------------------------------------------------------------------------
 
@@ -3041,6 +3357,7 @@ async function main() {
   await recipeTests();
   await urlImportTests();
   await recipeBuilderTests();
+  await planPlumbingTests();
   await stretchTests();
   await movementTests();
   await weightTests();
