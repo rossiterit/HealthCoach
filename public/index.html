@@ -434,6 +434,13 @@
   }
   .card .cx:hover { color: var(--ac-clay); }
   .card.sel { border-color: var(--ac-gold); background: #f7efe0; }
+  /* A recipe card reads as a recipe without shouting about it. */
+  .card.isrecipe { border-left: 2px solid var(--ac-gold); }
+  .card .srv {
+    border: 1px solid var(--line); background: var(--paper2); border-radius: 9px;
+    font: inherit; font-size: 10px; line-height: 1; padding: 2px 5px; color: var(--muted); cursor: pointer;
+  }
+  .card .srv:hover { color: var(--ink); border-color: var(--ink); }
 
   /* Totals row, under the grid, one cell per day — mockup order:
      Calories | Protein | Fat | Carbs | Sodium. Plain ink: nothing here
@@ -1647,9 +1654,28 @@ function totalsNode(t) {
 }
 
 function cardNode(card, day, slot) {
-  const c = el('div', 'card' + (plan.armed && plan.armed.entryId === card.entryId ? ' sel' : ''));
+  const c = el('div', 'card' + (plan.armed && plan.armed.entryId === card.entryId ? ' sel' : '') +
+    (card.isRecipe ? ' isrecipe' : ''));
   c.draggable = true;
   c.appendChild(el('span', 'cname', card.name));
+
+  // A slotted recipe is one serving unless set otherwise (v4 Decision 4).
+  // Shown only on recipes: a plain food has no servings dimension to set.
+  if (card.isRecipe) {
+    const srv = el('button', 'srv', `x${card.servings}`);
+    srv.title = `${card.servings} serving${card.servings === 1 ? '' : 's'} of ${card.name} — tap to change`;
+    srv.setAttribute('aria-label', `Servings of ${card.name} on ${day.weekday}: ${card.servings}`);
+    srv.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const next = window.prompt(`How many servings of ${card.name}?`, String(card.servings));
+      if (next === null) return;
+      try {
+        applyPlanPayload(await planApi('/plan/servings', { week: plan.week, entryId: card.entryId, servings: Number(next) }));
+        planMsg(`${card.name} on ${day.weekday}: ${Number(next)} serving${Number(next) === 1 ? '' : 's'}.`);
+      } catch (err) { planMsg(err.message, true); }
+    });
+    c.appendChild(srv);
+  }
 
   const x = el('button', 'cx', '×');
   x.title = 'Take this off the plan';

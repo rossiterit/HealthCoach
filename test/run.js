@@ -924,8 +924,11 @@ async function planIntegrationTests() {
     const { s } = plannedWeek(now);
     const block = dietcoach.weekPlanBlock(s, CFG, now);
     assert.ok(/SHOPPING LIST/i.test(block), block.slice(0, 140));
-    assert.ok(/build it from THIS grid/i.test(block), 'the grid must win over history');
-    assert.ok(/Do not draft from their history while a plan exists/i.test(block));
+    assert.ok(/use THOSE lines/i.test(block), 'the grid must win over history');
+    assert.ok(/do not draft from their history while a plan exists/i.test(block));
+    // v4 F4: the lines are worked out in code, not left to the model's prose.
+    assert.ok(/WHAT THAT WEEK NEEDS BUYING/i.test(block));
+    assert.ok(/do not recompute the amounts/i.test(block));
   });
 
   await test('with an empty grid it falls back to history-based drafting', () => {
@@ -1612,6 +1615,120 @@ async function recipeTests() {
     assert.ok(/Never grade a recipe/i.test(p));
     assert.ok(/Only when asked/i.test(p), 'the healthifier speaks when spoken to');
     assert.ok(/Never overwrite the original/i.test(p));
+  });
+
+  await test('a slotted recipe is one serving unless set otherwise', () => {
+    const { s, r } = stocked();
+    const WEEK = '2026-09-21';
+    const a = planner.assign(s, WEEK, { date: '2026-09-23', slot: 'dinner', foodId: r.id });
+    assert.strictEqual(a.entry.servings, 1);
+    assert.strictEqual(a.entry.isRecipe, true);
+    assert.strictEqual(a.entry.nutrition.calories_kcal, 250, 'one serving of the four-serving pot');
+
+    const two = planner.setServings(s, WEEK, a.entry.entryId, 2);
+    assert.strictEqual(two.entry.servings, 2);
+    assert.strictEqual(two.entry.nutrition.calories_kcal, 500, 'two servings, twice the macros');
+    const wed = planner.view(s, CFG, WEEK).days.find((d) => d.date === '2026-09-23');
+    assert.strictEqual(wed.totals.fields[0].value, 500, 'and the day totals follow');
+  });
+
+  await test('servings can be set on a recipe and refused on a plain food', () => {
+    const { s, oats } = stocked();
+    const WEEK = '2026-09-21';
+    const a = planner.assign(s, WEEK, { date: '2026-09-22', slot: 'breakfast', foodId: oats.id });
+    assert.strictEqual(a.entry.isRecipe, false);
+    assert.strictEqual(a.entry.servings, 1);
+    const out = planner.setServings(s, WEEK, a.entry.entryId, 3);
+    assert.ok(/Only a recipe/i.test(out.error), out.error);
+  });
+
+  await test('a recipe can be slotted at fractional servings, within bounds', () => {
+    const { s, r } = stocked();
+    const WEEK = '2026-09-21';
+    const a = planner.assign(s, WEEK, { date: '2026-09-21', slot: 'lunch', foodId: r.id, servings: 0.5 });
+    assert.strictEqual(a.entry.servings, 0.5);
+    assert.strictEqual(a.entry.nutrition.calories_kcal, 125);
+    assert.strictEqual(planner.servingsOf({ servings: 0 }), 1, 'nonsense falls back to one');
+    assert.strictEqual(planner.servingsOf({ servings: 999 }), 24, 'and is capped');
+  });
+
+  await test('the shopping list expands planned recipes, scaled by servings', () => {
+    const s = new Store(tmpDir()).load();
+    const onion = s.addFood({ name: 'Onion', quantity: '1 medium', nutrition: { calories_kcal: 44 } });
+    const beans = s.addFood({ name: 'Kidney beans', quantity: '1 cup', nutrition: { calories_kcal: 200 } });
+    const chili = s.addRecipe({
+      name: 'Chili', servings: 4,
+      ingredients: [
+        { foodId: onion.id, name: 'Onion', quantity: '2 onions', amount: 2 },
+        { foodId: beans.id, name: 'Kidney beans', quantity: '400 g', amount: 3 },
+        { name: 'Smoked paprika', quantity: 'a pinch' },
+      ],
+      steps: ['Cook.'],
+    });
+    const WEEK = '2026-09-21';
+    // Planned for two servings of a four-serving recipe: everything halves.
+    planner.assign(s, WEEK, { date: '2026-09-21', slot: 'dinner', foodId: chili.id, servings: 2 });
+
+    const list = planner.shoppingList(s, CFG, WEEK);
+    assert.deepStrictEqual(list.recipesExpanded, ['Chili']);
+    const byName = Object.fromEntries(list.lines.map((l) => [l.name, l]));
+    assert.strictEqual(byName['Kidney beans'].quantity, '200 g', '400 g halved');
+    assert.strictEqual(byName['Kidney beans'].amount, 1.5, 'and the multiplier with it');
+    assert.strictEqual(byName.Onion.quantity, '1 onion', 'singularised when it scales down past one');
+    // A quantity that cannot be halved honestly is passed through and marked.
+    assert.ok(/as written/.test(byName['Smoked paprika'].quantity), byName['Smoked paprika'].quantity);
+  });
+
+  await test('the list merges the same ingredient across recipes, by library item', () => {
+    const s = new Store(tmpDir()).load();
+    const onion = s.addFood({ name: 'Onion', quantity: '1 medium', nutrition: { calories_kcal: 44 } });
+    const a = s.addRecipe({ name: 'Chili', servings: 2, ingredients: [{ foodId: onion.id, name: 'Onion', quantity: '2 onions', amount: 2 }] });
+    const b = s.addRecipe({ name: 'Soup', servings: 2, ingredients: [{ foodId: onion.id, name: 'Yellow onion', quantity: '1 onion', amount: 1 }] });
+    const WEEK = '2026-09-21';
+    planner.assign(s, WEEK, { date: '2026-09-21', slot: 'dinner', foodId: a.id, servings: 2 });
+    planner.assign(s, WEEK, { date: '2026-09-22', slot: 'dinner', foodId: b.id, servings: 2 });
+
+    const list = planner.shoppingList(s, CFG, WEEK);
+    const onions = list.lines.filter((l) => l.foodId === onion.id);
+    assert.strictEqual(onions.length, 1, 'two names for one library item must merge to one line');
+    assert.strictEqual(onions[0].amount, 3, '2 + 1');
+    assert.strictEqual(onions[0].quantity, '3 onions', 'and the quantities add up rather than listing');
+    assert.deepStrictEqual(onions[0].fromRecipes.sort(), ['Chili', 'Soup']);
+  });
+
+  await test('quantities that do not share a unit are listed, never summed', () => {
+    // "200 g + a pinch" is honest; "200.1 g" would not be.
+    const s = new Store(tmpDir()).load();
+    const salt = s.addFood({ name: 'Salt', quantity: '1 tsp', nutrition: {} });
+    const a = s.addRecipe({ name: 'A', servings: 1, ingredients: [{ foodId: salt.id, name: 'Salt', quantity: '200 g', amount: 1 }] });
+    const b = s.addRecipe({ name: 'B', servings: 1, ingredients: [{ foodId: salt.id, name: 'Salt', quantity: 'a pinch', amount: 1 }] });
+    const WEEK = '2026-09-21';
+    planner.assign(s, WEEK, { date: '2026-09-21', slot: 'dinner', foodId: a.id });
+    planner.assign(s, WEEK, { date: '2026-09-22', slot: 'dinner', foodId: b.id });
+    const line = planner.shoppingList(s, CFG, WEEK).lines.find((l) => l.foodId === salt.id);
+    assert.ok(line.quantity.includes('+'), line.quantity);
+  });
+
+  await test('a week with no recipes still lists its plain items, and an empty week says so', () => {
+    const s = new Store(tmpDir()).load();
+    const oats = s.addFood({ name: 'Oats', quantity: '40 g', nutrition: { calories_kcal: 150 } });
+    const WEEK = '2026-09-21';
+    assert.strictEqual(planner.shoppingList(s, CFG, WEEK).fromPlan, false, 'nothing planned, nothing to buy');
+    planner.assign(s, WEEK, { date: '2026-09-21', slot: 'breakfast', foodId: oats.id });
+    const list = planner.shoppingList(s, CFG, WEEK);
+    assert.strictEqual(list.fromPlan, true);
+    assert.deepStrictEqual(list.lines.map((l) => l.name), ['Oats']);
+    assert.deepStrictEqual(list.recipesExpanded, [], 'no recipes to expand');
+  });
+
+  await test('the shopping list carries no grading, only what to buy', () => {
+    const { s, r } = stocked();
+    const WEEK = '2026-09-21';
+    planner.assign(s, WEEK, { date: '2026-09-21', slot: 'dinner', foodId: r.id });
+    const json = JSON.stringify(planner.shoppingList(s, CFG, WEEK));
+    for (const banned of ['score', 'grade', 'healthy', 'warning', 'calories']) {
+      assert.ok(!new RegExp(`"${banned}`, 'i').test(json), `a shopping list must carry no "${banned}" field`);
+    }
   });
 
   await test('a v3 store gains the recipes table with nothing migrated', () => {
