@@ -329,6 +329,7 @@
   .rc-nut .basis { font-size: 11px; color: var(--muted); margin-top: 5px; font-style: italic; }
   .rc-nut .partial { font-size: 11px; color: var(--warn-text); margin-top: 5px; }
 
+  .ing-hint { font-size: 11px; color: var(--muted); margin: -2px 0 8px; font-style: italic; }
   .rc-msg { font-size: 12px; color: var(--muted); min-height: 17px; }
   .rc-msg.warn { color: var(--warn-text); }
   .rc-foot { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
@@ -1283,6 +1284,11 @@ function paintIngredients() {
     qty.setAttribute('aria-label', `Quantity for ingredient ${i + 1}`);
     qty.value = row.quantity;
     qty.addEventListener('input', () => { row.quantity = qty.value; });
+    // The two values stay coupled by default (owner refinement 2026-09-27):
+    // when the quantity text settles, the coach proposes the multiplier from
+    // it. On change rather than on input, because each proposal is a model
+    // call and one per keystroke would be absurd.
+    qty.addEventListener('change', () => proposeAmountFor(i));
     r.appendChild(qty);
 
     const amt = el('input');
@@ -1291,7 +1297,11 @@ function paintIngredients() {
     amt.title = 'How many of this item’s library servings this row is — what the calorie maths counts';
     amt.setAttribute('aria-label', `Library servings for ingredient ${i + 1}`);
     amt.value = String(row.amount);
-    amt.addEventListener('change', () => { row.amount = Number(amt.value) || 1; });
+    amt.addEventListener('change', () => {
+      row.amount = Number(amt.value) || 1;
+      row.proposed = null; // typed over deliberately: stop calling it a proposal
+      paintIngredients();
+    });
     r.appendChild(amt);
 
     const del = el('button', 'del', '×');
@@ -1300,8 +1310,45 @@ function paintIngredients() {
     r.appendChild(del);
 
     host.appendChild(r);
+
+    // Say where a proposed multiplier came from, so it reads as a suggestion
+    // worth a glance rather than a figure the app is certain of.
+    if (row.proposed) {
+      host.appendChild(el('div', 'ing-hint', row.proposed.confident === false
+        ? `Rough guess: ${row.proposed.text}. Worth a look.`
+        : `From your quantity: ${row.proposed.text}`));
+    }
   });
   if (!rc.draft.ingredients.length) host.appendChild(el('div', 'rc-empty', 'No ingredients yet.'));
+}
+
+/**
+ * Ask the coach what multiple of the library serving this row's quantity is.
+ * Silent when the ingredient is not in the library yet — there is nothing to
+ * compare against, and the first save proposes for those once they exist.
+ */
+async function proposeAmountFor(i) {
+  const row = rc.draft.ingredients[i];
+  if (!row || !row.name.trim() || !row.quantity.trim()) return;
+  const wasQuantity = row.quantity;
+  try {
+    const out = await rcApi('/recipes/amount', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: row.name, quantity: row.quantity, foodId: row.foodId }),
+    });
+    // The owner may have kept typing while that was in flight; never clobber a
+    // row that has moved on since the question was asked.
+    if (rc.draft.ingredients[i] !== row || row.quantity !== wasQuantity) return;
+    if (!out.amount) return;
+    row.amount = out.amount;
+    row.proposed = {
+      confident: out.confident,
+      text: out.reasoning || `${out.amount} x ${out.itemServing || 'library serving'}`,
+    };
+    paintIngredients();
+    paintNutrition();
+  } catch { /* a proposal that fails leaves the row exactly as it was */ }
 }
 
 function paintSteps() {
@@ -1397,7 +1444,8 @@ async function saveRecipe() {
     servings: d.servings,
     prepMinutes: d.prepMinutes,
     cookMinutes: d.cookMinutes,
-    ingredients: d.ingredients.filter((i) => i.name.trim()),
+    ingredients: d.ingredients.filter((i) => i.name.trim())
+      .map(({ foodId, name, quantity, amount }) => ({ foodId, name, quantity, amount })),
     steps: d.steps.filter((s) => s.trim()),
   };
   try {

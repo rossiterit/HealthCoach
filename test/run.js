@@ -1495,6 +1495,31 @@ async function recipeTests() {
     assert.strictEqual(tue.slots.find((x) => x.slot === 'lunch').cards.length, 0);
   });
 
+  await test('the editor couples quantity and multiplier, and says so in the page', () => {
+    // Owner refinement 2026-09-27: quantity text proposes the serving
+    // multiplier, and the owner can override. Asserted on the shipped page so
+    // the coupling cannot be dropped in a later edit without failing here.
+    const page = fs.readFileSync(path.join(ROOT, 'public/index.html'), 'utf8');
+    assert.ok(/proposeAmountFor/.test(page), 'the editor must ask for a proposal');
+    assert.ok(/qty\.addEventListener\('change'/.test(page), 'on change, not per keystroke');
+    assert.ok(/row\.proposed = null/.test(page), 'and typing over it must clear the proposal');
+    assert.ok(/From your quantity/.test(page), 'the row says where the number came from');
+  });
+
+  await test('a proposal that fails leaves the row exactly as it was', async () => {
+    // Fails soft: an unreachable model must not block an edit or a save.
+    const bad = { ...CFG, secrets: { anthropicKeyPath: '/nonexistent/key.txt' } };
+    const out = await foods.proposeAmount(bad, { itemName: 'oats', itemServing: '40 g', quantity: '200 g' });
+    assert.strictEqual(out.amount, null);
+    assert.ok(out.reason, 'and it says why, without throwing');
+  });
+
+  await test('a proposal is refused outright when there is no quantity to read', async () => {
+    const out = await foods.proposeAmount(CFG, { itemName: 'oats', itemServing: '40 g', quantity: '  ' });
+    assert.strictEqual(out.amount, null);
+    assert.ok(/no quantity/i.test(out.reason), out.reason);
+  });
+
   await test('a v3 store gains the recipes table with nothing migrated', () => {
     const dir = tmpDir();
     fs.writeFileSync(path.join(dir, 'store.json'), JSON.stringify({
