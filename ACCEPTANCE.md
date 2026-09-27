@@ -1,3 +1,142 @@
+# HealthCoach v5 — acceptance note
+
+**Date:** 2026-09-27 · **Epic:** GOTK-175 (Coach release) · **Built by:** Claude Code, on the GOTK droplet
+
+*(v4's note follows below; earlier ones are in git history.)*
+
+## Read this first
+
+v5 is **built, merged and running.** Your data came through untouched.
+
+**<https://gotkapp.com/healthcoach/>** — **hard-reload the first time
+(Ctrl+Shift+R, ⌘+Shift+R on a Mac).** Both the Plan and Recipes tabs gained
+buttons, and a stale copy will hide them.
+
+## What's new
+
+**Build with Coach** — on the Recipes tab, beside New recipe. Name a dish, tap
+one of seven chips, add a note if you want ("dairy-free", "for 6"), and it
+writes you a draft that opens in the ordinary editor. Yours to change or delete
+like anything else.
+
+The seven: **Low calorie · High protein · Low carb · Portion controlled ·
+Balanced · Quick · Treat.** Treat means the real thing, made properly, **with
+not one word about nutrition** — no lightening, no swaps, no "in moderation".
+The macros still show on the card, because that's information; the opinion is
+what's missing, deliberately.
+
+**Plan with Coach** — on the Plan tab. Ask for a day or the whole week, add a
+slant if you like ("low carb"), and it drafts straight into the grid as a
+**preview**: dashed, greyish, italic cards that are visibly *not* in your plan.
+Nothing commits until you press something. **Apply all**, **Apply this day**, or
+**Discard**. Taking Monday leaves the rest still on offer.
+
+It plans around anything you've already put in a day — it won't move your
+cards, and if you fill a slot after it drafted, it skips that one and says so.
+Sunday stays yours. It builds from your own recipes, favourites and library
+first, is happy to let a four-serving recipe cover two nights, and leaves some
+slots deliberately open.
+
+**Create shopping list** — also on the Plan tab. Builds from the week's grid,
+then shows it to you **before anything happens**: grouped by aisle, everything
+ticked, each row with a quantity you can fix and an X to remove, plus a box to
+add the things that were never in the plan. Then **Copy as text** or **Send to
+King Soopers** — and both carry *only what's ticked*.
+
+Unticking is silent. No "are you sure", no note about which meal it came from.
+What you decide not to buy isn't the app's business. Unticked things drop to a
+"Not buying" list rather than vanishing, so a mis-tap is one tap back.
+
+Everything above works by typing it in chat too.
+
+## How to check it
+
+1. **Hard-reload.** Recipes tab → **Build with Coach** → a dish, a mode, Draft.
+   Try **Treat** on something you'd expect to be lectured about.
+2. Plan tab → **Plan with Coach** → the week → Propose. Look at the dashed
+   cards. **Apply this day** on one, check the rest is still offered, then
+   **Discard**. Your grid should hold exactly the day you took.
+3. Put a card in a day yourself, *then* ask it to plan the week — it should work
+   around you.
+4. **Create shopping list** → untick a couple → add something → **Copy as
+   text**. You should get exactly what's ticked.
+5. Say **"plan a low-carb week"** in chat and check the slant carries.
+
+## Two things to expect
+
+- **Both coach buttons take a minute or two.** Writing the recipe or the plan is
+  quick; looking up every ingredient it hasn't seen and working out serving
+  multipliers is the slow part. The buttons say "Writing it…" and "Thinking…".
+- **A planned item that's a saved *meal* rather than a *recipe*** lands on the
+  shopping list as itself — "chicken caesar salad" rather than lettuce, chicken
+  and parmesan. Only recipes know their ingredients. That's how it has worked
+  since v4; the review step is where you fix it by hand. Say the word if you'd
+  like meals to expand too and I'll spec it properly.
+
+## Three new tools, all store-only, all pre-ratified
+
+Decision 7 pre-approved "plan/list plumbing" and asked me to name each one:
+
+- **`propose_plan`** — writes a draft to the proposals table. Nothing it does
+  can reach your committed grid.
+- **`apply_plan_proposal`** — the only path from proposed to committed, and it
+  runs only when you say so. Also handles discard.
+- **`create_shopping_list`** — builds the reviewed list from the grid. **It
+  orders nothing**; the Kroger send stays a separate, explicit press.
+
+The pinned test was updated deliberately, with a comment explaining each. It
+flagged `create_shopping_list` because the name contains "shop" — rather than
+widen the word list and blunt the guard, I named it and then *proved* it: a
+test asserts that module requires nothing that can reach a network, makes no
+request, and exports nothing shaped like ordering.
+
+**Your external surface is unchanged: Kroger (add to cart only) and the
+single-URL recipe import. v5 added nothing that reaches outside.**
+
+## Three bugs worth telling you about
+
+All three were found by driving the actual buttons, not by a test.
+
+- **"Apply this day" silently applied the whole week**, and the Propose button
+  didn't work at all. The page helper takes a payload; I handed it a whole
+  fetch-options object, so the server got a wrapper and saw none of the fields.
+  Everything looked right in isolation — the route was right, the tool was
+  right, hitting the route directly did exactly the right thing. There's now a
+  test that fails if that shape is ever passed again.
+- **Applying one day killed the rest of the proposal**, making the other five
+  days unreachable the moment you accepted Monday.
+- **My Treat-mode guard was wrong in the dangerous direction.** It banned the
+  bare words "low", "reduced" and "lighter", and promptly failed four correct
+  recipes for "keep the sausages on a **low** heat", "**reduce** the sauce" and
+  "a **lighter** batter". A guard that fires on correct output is worse than
+  none, because the next person to hit it deletes it. It's anchored to actual
+  nutrition words now and tested in both directions. (The same over-broad
+  matching later flagged the "Dry **goods**" aisle as a judgement word.)
+
+## What I couldn't do
+
+**Still no renderer on this droplet** — 956 MB of RAM, Chromium won't start. So
+the mode chips, the preview layer and the review modal were driven in a real
+DOM at 1280px and 390px, with identical results, plus full click-throughs of
+build → editor, propose → apply-one-day → discard, and generate → cull → add →
+copy → send. That proves behaviour. **Whether it *looks* right is your
+click-through, and the spec gives you the veto.**
+
+## Verification
+
+281 tests green on merged main. Every item went branch → throwaway instance on
+:8799 → PR → merge → pull → restart → ticket. PRs
+[#12](https://github.com/rossiterit/HealthCoach/pull/12),
+[#13](https://github.com/rossiterit/HealthCoach/pull/13),
+[#14](https://github.com/rossiterit/HealthCoach/pull/14) and
+[#15](https://github.com/rossiterit/HealthCoach/pull/15).
+
+GOTK-176, 177, 178 and 179 are all Done, and GOTK-175 was closed only after
+checking no child was still open — including GOTK-179, which appeared mid-build
+when Decision 9 was added to the spec by change control.
+
+---
+
 # HealthCoach v4 — acceptance note
 
 **Date:** 2026-09-27, amended same day · **Epic:** GOTK-169 (Recipes release) · **Built by:** Claude Code, on the GOTK droplet
