@@ -1,3 +1,122 @@
+# Amendment, 2026-10-12 — GOTK-181, King Soopers send + list quality (Decisions 11–12)
+
+## Why the send matched nothing
+
+**Root cause: product search was using the wrong token.** The send path asked
+Kroger for *your* cart token (`cart.basic:write`) and then used that same token
+for the Products search. Kroger refuses that with **403 AUTH-1007, "Invalid
+token on request"** — and the old code turned every refused search into
+"could not match anything". So it was never a matching problem: every search
+was rejected, and the error was misreported as "no matches".
+
+Checked live before touching code, at your store (King Soopers – Havana and
+Mississippi, 1155 S Havana St, `locationId 62000030`, which is set correctly):
+
+| Searched (term + store id only) | With the app's own search token |
+|---|---|
+| strawberries | Fresh Strawberries – 1 LB Clamshell |
+| lime | Fresh Large Limes – Each |
+| yellow onion | Jumbo Yellow Onions |
+
+The app credentials were valid (checked today). Your refresh token was
+accepted when last checked on 2026-09-28; the first live Send confirms it
+again. Nothing else was wrong: `lib/kroger.js` was unchanged since GOTK-168,
+the store id was right, and the terms were reaching Kroger.
+
+**Why it looked like a regression:** this path had probably never worked end
+to end. GOTK-168's acceptance checked matching with the app's own token and
+says plainly that it couldn't test the cart add (no link existed yet), so the
+search-with-your-token step was first exercised on 2026-09-27. Search now uses the app's own
+`client_credentials` token with `product.compact` scope. Your token is used for
+the cart and nothing else.
+
+A second bug I found on the way: if Kroger was merely *slow* when refreshing
+your link, the app deleted your saved link anyway. It now only forgets the link
+when Kroger actually refuses it.
+
+## What's different on the list
+
+- **Shopping terms, not recipe text.** "spring onions, 3, thinly sliced" is
+  now **green onions**, with "3, thinly sliced" kept underneath as a note.
+- **Matched when you build it.** Every line shows the King Soopers product and
+  how many packages, as a whole number: 1300 g of turkey is **3 × 1 lb**, and
+  a pinch of paprika is **1 jar**. If the match is wrong, pick another from the
+  dropdown, change the count, or untick it.
+- **One line per thing.** White onion from one recipe and yellow onion from
+  another make **one "onions" line**, with both amounts carried. Adding
+  "onions" by hand when it's already there adds one to that line. Two lines
+  that land on the same product merge too.
+- **Three honest messages**, each on the line it applies to:
+  **"King Soopers didn't respond"**, **"King Soopers sign-in expired"**,
+  **"No match for this item"**. Lines with any of these stay on the list (and
+  in Copy, marked) but are never sent. An error is never called "no matches"
+  again.
+- **Send says what happened.** Afterwards you get one summary: what went in,
+  with counts, and what didn't and why. If the send itself fails, nothing is
+  added, and it says so first.
+- **Stale lists say so.** Change the plan after building a list and opening it
+  shows **"Your plan changed since this list was made — Rebuild"**. Your ticks
+  and edits stay until you tap Rebuild. It never rebuilds on its own.
+- **Tap water and ice start unticked.** Found while testing: a recipe's "cold
+  water" matched a 40-bottle case. They now sit under *Not buying*, one tap
+  from coming back, and everything else still starts ticked.
+
+## When King Soopers is contacted
+
+- **Products search (read-only):** only when you **create** the list,
+  **Rebuild** it, or **add an item by hand**. Never when you open the page or
+  the list, edit the grid, tick or untick, or change a count, and never from
+  the schedule or the briefing. Each search sends only the cleaned term and
+  the store id.
+- **Cart add:** only when you press **Send**, or ask the coach to send.
+- Every search is logged with its reason, so you can check this rather than
+  take it on trust:
+  `journalctl -u healthcoach | grep '\[kroger\]'`
+
+## Governance
+
+- **Tool pin unchanged.** It's still the same 14 tools. Two of them work
+  differently, deliberately:
+  - `create_shopping_list` now runs the read-only Products search. That's the
+    "create" in Decision 11.
+  - `send_list_to_kroger` no longer takes an item list from the model. It sends
+    the list you reviewed, as the products and counts you saw. That closes the
+    route by which a search could have run at send time, or by which anything
+    other than your reviewed list could have reached the cart.
+- **No new endpoints, credentials or tools, and no personal data out.** The new
+  module, `lib/shopterms.js`, is plain code with no network access, and
+  `shoppinglist.js` still requires nothing that can reach outside. A test
+  checks both.
+- Product names from Kroger are shown as text and are **never passed to the
+  model**. The chat's send summary uses your own line names.
+- One new config setting, `kroger.timeoutMs` (default 15 s), which can be
+  overridden by `HEALTHCOACH_KROGER_TIMEOUT_MS`. It exists so that "didn't
+  respond" can be forced and seen.
+
+## What I verified, and where
+
+On a throwaway instance with a copy of your data, against the **real Kroger
+API** with read-only searches:
+
+- A 110-line week built in about 34 s: 105 matched, 5 honest no-matches
+  (Aleppo pepper, flat-leaf parsley, bocconcini, pickled turnips, sweet
+  paprika).
+- Opening the list, the grid edit, ticks, counts and the dropdown all logged
+  no search.
+- A bogus client secret gave "sign-in expired" (HTTP 401). A 1 ms timeout gave
+  "didn't respond". "zzqx flarnberry" gave "no match".
+- A grid edit brought up the stale line with the unticks kept, and Rebuild
+  cleared it.
+
+The throwaway had **no Kroger link**, so it couldn't touch a cart. The real cart
+add, and the live checks below, happen on the live site.
+
+**Live checks:** *(pending — filled in after deploy)*
+
+312 offline tests green.
+
+---
+
 # HealthCoach v5 — acceptance note
 
 **Date:** 2026-09-27 · **Epic:** GOTK-175 (Coach release) · **Built by:** Claude Code, on the GOTK droplet

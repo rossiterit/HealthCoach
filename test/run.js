@@ -1149,14 +1149,18 @@ async function krogerTests() {
     assert.ok(why, 'there must be a reason');
     assert.ok(!/nonexistent|\/root|\.txt/.test(why), `the reason must not name a path: ${why}`);
 
-    const out = await kroger.sendList(cfg, [{ name: 'porridge oats', quantity: 1 }]);
+    const out = await kroger.sendCart(cfg, [{ upc: '0001', quantity: 1 }]);
     assert.ok(out.error, 'it must not pretend to have sent anything');
     assert.ok(!out.added, 'and must report nothing added');
+    // ...and a search with no credentials never reaches the network, and is
+    // not reported as "no match" either (GOTK-181).
+    const res = await kroger.matchTerms(cfg, ['porridge oats'], { reason: 'test' });
+    assert.notStrictEqual(res.get('porridge oats').kind, 'no_match');
   });
 
   await test('with no store configured it fails closed rather than guessing a shop', async () => {
     const cfg = kcfg({ kroger: { locationId: null } });
-    const out = await kroger.sendList(cfg, [{ name: 'porridge oats' }]);
+    const out = await kroger.sendCart(cfg, [{ upc: '0001', quantity: 1 }]);
     assert.ok(out.error);
     assert.ok(/store/i.test(out.error), out.error);
   });
@@ -1164,23 +1168,40 @@ async function krogerTests() {
   await test('unlinked, it asks to be linked rather than failing obscurely', async () => {
     const cfg = kcfg(); // credentials present, but no refresh token on disk
     assert.strictEqual(kroger.readRefreshToken(cfg), null);
-    const out = await kroger.sendList(cfg, [{ name: 'porridge oats' }]);
+    const out = await kroger.sendCart(cfg, [{ upc: '0001', quantity: 1 }]);
     assert.ok(/not linked/i.test(out.error), out.error);
   });
 
   await test('switched off in config, the handoff is simply unavailable', async () => {
     const cfg = kcfg({ kroger: { enabled: false } });
-    const out = await kroger.sendList(cfg, [{ name: 'oats' }]);
+    const out = await kroger.sendCart(cfg, [{ upc: '0001', quantity: 1 }]);
     assert.ok(out.error);
     assert.ok(!out.added);
+    const res = await kroger.matchTerms(cfg, ['oats'], { reason: 'test' });
+    assert.ok(res.get('oats').unavailable, 'search is off too');
   });
+
+  // A reviewed list with matches already on it, as a build leaves it.
+  function reviewedList(s, week, rows) {
+    s.setShoppingList(week, {
+      weekStart: week, generatedAt: new Date().toISOString(), planFingerprint: 'x',
+      items: rows.map((r, i) => ({
+        key: `k${i}`, name: r.name, quantity: r.quantity || '', note: '', needs: [], category: 'Other',
+        included: r.included !== false, fromRecipes: [], manual: false, aliases: [],
+        status: r.upc ? 'matched' : (r.status || 'no_match'),
+        match: r.upc ? { upc: r.upc, description: r.description || r.name, brand: null, size: r.size || null } : null,
+        candidates: r.upc ? [{ upc: r.upc, description: r.description || r.name, brand: null, size: r.size || null }] : [],
+        count: r.count || 1, extra: 0, countSet: false,
+      })),
+    });
+  }
 
   await test('the tool hands back the plain list when the handoff fails', async () => {
     const cfg = kcfg({ idPath: '/nonexistent/id.txt', secretPath: '/nonexistent/secret.txt' });
     const s = new Store(tmpDir()).load();
-    const out = await dietcoach.runTool(s, cfg, 'send_list_to_kroger', {
-      items: [{ name: 'porridge oats', quantity: 2 }, { name: 'salmon fillets' }],
-    });
+    const week = planner.plannableWeeks(new Date(), cfg.timezone)[0];
+    reviewedList(s, week, [{ name: 'porridge oats', upc: '0001', count: 2 }, { name: 'salmon fillets', upc: '0002' }]);
+    const out = await dietcoach.runTool(s, cfg, 'send_list_to_kroger', {});
     assert.ok(out.krogerFailedClosed, 'the failure must be visible to the caller');
     assert.ok(/porridge oats/.test(out.result), 'the plain list must come back');
     assert.ok(/salmon fillets/.test(out.result));
@@ -1189,8 +1210,22 @@ async function krogerTests() {
   });
 
   await test('an empty list is refused before any network call', async () => {
-    const out = await dietcoach.runTool(new Store(tmpDir()).load(), kcfg(), 'send_list_to_kroger', { items: [] });
-    assert.ok(/nothing on the list/i.test(out.result), out.result);
+    const s = new Store(tmpDir()).load();
+    const out = await dietcoach.runTool(s, kcfg(), 'send_list_to_kroger', {});
+    assert.ok(/no shopping list/i.test(out.result), out.result);
+    // A list with nothing matched has nothing to send, and says so.
+    const week = planner.plannableWeeks(new Date(), CFG.timezone)[0];
+    reviewedList(s, week, [{ name: 'quince paste', status: 'no_match' }]);
+    const out2 = await dietcoach.runTool(s, kcfg(), 'send_list_to_kroger', {});
+    assert.ok(/nothing on the list to send/i.test(out2.result), out2.result);
+  });
+
+  await test('the chat send carries the reviewed list, and the model passes no items', () => {
+    // Decision 11: searches run at build, not at send. A model-chosen item list
+    // would need a search at send time and would bypass the review.
+    const tool = coach.allTools().find((t) => t.name === 'send_list_to_kroger');
+    assert.ok(!('items' in (tool.input_schema.properties || {})), 'no items parameter');
+    assert.deepStrictEqual(tool.input_schema.required || [], []);
   });
 
   // --- credentials are used, never shown ------------------------------------
@@ -1264,31 +1299,34 @@ async function krogerTests() {
 
   // --- the echo --------------------------------------------------------------
 
-  await test('the echo names every added item with size and quantity', () => {
-    const text = kroger.echo({
-      added: [
-        { brand: 'Simple Truth', description: 'Rolled Oats', size: '18 oz', quantity: 2, requested: 'porridge oats' },
-        { brand: null, description: 'Atlantic Salmon Fillet', size: '1 lb', quantity: 3, requested: 'salmon fillets' },
+  await test('the send summary names every added product and count, and what was not added and why', () => {
+    const plan = {
+      lines: [
+        { name: 'oats', upc: '1', quantity: 2, product: 'Simple Truth Rolled Oats, 18 oz' },
+        { name: 'salmon', upc: '2', quantity: 3, product: 'Atlantic Salmon Fillet, 1 lb' },
       ],
-      unmatched: [{ name: 'the good yoghurt', why: 'no match' }],
-      storeId: '62000030',
-    });
-    assert.ok(/Simple Truth Rolled Oats, 18 oz x2/.test(text), text);
-    assert.ok(/Atlantic Salmon Fillet, 1 lb x3/.test(text), text);
-    assert.ok(/the good yoghurt/.test(text), 'unmatched lines come back for manual shopping');
+      skipped: [{ name: 'the good yoghurt', why: 'No match for this item' }, { name: 'tahini', why: "King Soopers didn't respond" }],
+    };
+    const text = shoppinglist.summarise({ added: 2 }, plan);
+    assert.ok(/Added 2 items/.test(text), text);
+    assert.ok(/Simple Truth Rolled Oats, 18 oz ×2/.test(text), text);
+    assert.ok(/Atlantic Salmon Fillet, 1 lb ×3/.test(text), text);
+    assert.ok(/the good yoghurt — No match for this item/.test(text), 'unmatched lines come back with the reason');
+    assert.ok(/tahini — King Soopers didn't respond/.test(text), 'and an outage is called an outage');
     assert.ok(/cannot change or remove/i.test(text), 'and the add-only limit is stated where it matters');
   });
 
-  await test('when nothing matches, nothing is claimed and the list comes back', () => {
-    const text = kroger.echo({ nothingMatched: true, added: [], unmatched: [{ name: 'quince paste' }] });
-    assert.ok(/nothing was added/i.test(text), text);
-    assert.ok(/quince paste/.test(text));
+  await test('a failed send says nothing was added, and why', () => {
+    const text = shoppinglist.summarise({ error: 'King Soopers sign-in expired', kind: 'signin' },
+      { lines: [{ name: 'oats', upc: '1', quantity: 1, product: 'Oats' }], skipped: [] });
+    assert.ok(/^Nothing was added to your cart — King Soopers sign-in expired/.test(text), text);
+    assert.ok(!/no match/i.test(text), 'an auth failure is never "no match"');
   });
 
-  await test('the echo never contains a credential-shaped value', () => {
+  await test('the summary never contains a credential-shaped value', () => {
     const cfg = kcfg();
     kroger.writeRefreshToken(cfg, 'rt-secret-value');
-    const text = kroger.echo({ added: [{ description: 'Oats', size: '1 lb', quantity: 1 }], unmatched: [], storeId: '1' });
+    const text = shoppinglist.summarise({ added: 1 }, { lines: [{ name: 'oats', upc: '1', quantity: 1, product: 'Oats, 1 lb' }], skipped: [] });
     assert.ok(!text.includes('rt-secret-value'));
     assert.ok(!/Bearer|Basic |client_secret/i.test(text));
   });
@@ -1311,7 +1349,9 @@ async function krogerTests() {
     assert.ok(/Nothing about their weight, their goals, their log or their health/i.test(p));
     const tool = coach.allTools().find((t) => t.name === 'send_list_to_kroger');
     assert.ok(/ONLY WHEN THEY EXPLICITLY ASK/.test(tool.description), 'and in the tool description');
-    assert.ok(/Never pass meal descriptions, goals, weights/.test(tool.description));
+    // GOTK-181: the tool no longer takes items at all — it sends the reviewed
+    // list — so there is nothing for health data to be smuggled in through.
+    assert.ok(/You do not pass items/.test(tool.description));
   });
 
   await test('the coach is told where linking actually happens, and not to invent it', () => {
@@ -2101,6 +2141,451 @@ async function urlImportTests() {
 // the coach recipe builder — seven modes (v5 F1, GOTK-176)
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// v5 F5 — King Soopers matching at list build + list quality (GOTK-181,
+// Decisions 11 and 12)
+// ---------------------------------------------------------------------------
+
+async function listQualityTests() {
+  const shopterms = require(path.join(ROOT, 'lib/shopterms'));
+  const claude = require(path.join(ROOT, 'lib/claude'));
+
+  function kcfg2(over = {}) {
+    const dir = tmpDir();
+    const w = (n, b) => { const p = path.join(dir, n); fs.writeFileSync(p, b, { mode: 0o600 }); return p; };
+    return {
+      ...CFG, dataDir: dir, publicUrl: 'https://gotkapp.com/healthcoach/',
+      kroger: { enabled: true, locationId: '62000030', modality: 'PICKUP', redirectUri: 'https://x.invalid/cb', ...(over.kroger || {}) },
+      secrets: {
+        ...CFG.secrets,
+        krogerClientIdPath: w('id.txt', 'test-client-id'),
+        krogerClientSecretPath: w('secret.txt', 'test-client-secret'),
+        krogerRefreshTokenPath: path.join(dir, 'kroger_refresh_token.txt'),
+      },
+    };
+  }
+
+  /** Swap global fetch for a scripted one; returns the calls it saw. */
+  async function withFetch(handler, fn) {
+    const real = global.fetch;
+    const calls = [];
+    global.fetch = async (url, opts = {}) => {
+      calls.push({ url: String(url), opts });
+      return handler(String(url), opts, calls.length);
+    };
+    try { await fn(calls); } finally { global.fetch = real; }
+    return calls;
+  }
+  const json = (status, body) => ({ ok: status >= 200 && status < 300, status, text: async () => (body === undefined ? '' : JSON.stringify(body)) });
+  const tokenOk = () => json(200, { access_token: 'app-token', expires_in: 1800 });
+  const product = (upc, description, size) => ({ upc, description, brand: 'Fresh', items: [{ size, price: { regular: 3.99 } }] });
+
+  /** Model stand-in: answers record_shopping_lines from a fixed map. */
+  async function withModel(termFor, fn) {
+    const real = claude.complete;
+    claude.complete = async (cfg, { messages }) => {
+      const lines = messages[0].content.split('\n');
+      const items = lines.map((l) => {
+        const m = /^(\d+)\. (.*)$/.exec(l);
+        const t = termFor[m[2]] || { term: m[2] };
+        return { index: Number(m[1]), term: t.term, note: t.note || '', category: t.category || 'Produce', ...(t.not_bought ? { not_bought: true } : {}) };
+      });
+      return { stop_reason: 'tool_use', content: [{ type: 'tool_use', name: 'record_shopping_lines', input: { items } }] };
+    };
+    try { await fn(); } finally { claude.complete = real; }
+  }
+
+  // --- step 1: the root cause ----------------------------------------------
+
+  await test('ROOT CAUSE: product search uses the app token, never the owner cart token', async () => {
+    // The 2026-09-27 zero-match send searched Products with the owner's
+    // cart.basic:write token. Kroger answers that with 403 AUTH-1007, and the
+    // old code turned every 403 into "could not match anything". Search must
+    // ask for its own client_credentials token with the product scope.
+    const cfg = kcfg2();
+    kroger.writeRefreshToken(cfg, 'owner-refresh');
+    const calls = await withFetch((url, opts) => {
+      if (url.includes('/oauth2/token')) return tokenOk();
+      return json(200, { data: [product('0003338320027', 'Fresh Strawberries – 1 LB Clamshell', '1 lb')] });
+    }, async () => {
+      const res = await kroger.matchTerms(cfg, ['strawberries'], { reason: 'test' });
+      assert.strictEqual(res.get('strawberries').candidates[0].upc, '0003338320027');
+    });
+    const tok = calls.find((c) => c.url.includes('/oauth2/token'));
+    assert.ok(/grant_type=client_credentials/.test(tok.opts.body), tok.opts.body);
+    assert.ok(/scope=product\.compact/.test(tok.opts.body));
+    assert.ok(!calls.some((c) => /refresh_token/.test(String(c.opts.body || ''))), 'the owner link is not touched by a search');
+    assert.strictEqual(kroger.readRefreshToken(cfg), 'owner-refresh', 'and the refresh token is not rotated by it');
+  });
+
+  await test('a search sends only the cleaned term and the store id', async () => {
+    const cfg = kcfg2();
+    const calls = await withFetch((url) => (url.includes('/oauth2/token') ? tokenOk() : json(200, { data: [] })),
+      () => kroger.matchTerms(cfg, ['  yellow   onion '], { reason: 'test' }));
+    const search = new URL(calls.find((c) => c.url.includes('/products')).url);
+    assert.deepStrictEqual([...search.searchParams.keys()].sort(), ['filter.limit', 'filter.locationId', 'filter.term']);
+    assert.strictEqual(search.searchParams.get('filter.term'), 'yellow onion');
+    assert.strictEqual(search.searchParams.get('filter.locationId'), '62000030');
+  });
+
+  await test('search results are kept as data: trimmed, no price, nothing else', async () => {
+    const cfg = kcfg2();
+    let res;
+    await withFetch((url) => (url.includes('/oauth2/token') ? tokenOk()
+      : json(200, { data: [{ ...product('1', 'X'.repeat(500), '1 lb'), aisleLocations: [{ d: 'ignore me' }] }] })),
+    async () => { res = await kroger.matchTerms(cfg, ['oats'], { reason: 'test' }); });
+    const c = res.get('oats').candidates[0];
+    assert.deepStrictEqual(Object.keys(c).sort(), ['brand', 'description', 'size', 'upc']);
+    assert.ok(c.description.length <= 120);
+  });
+
+  // --- three honest failures (Decision 11e) ---------------------------------
+
+  await test('an empty answer is "no match"; a refusal is "sign-in expired"; silence is "didn\'t respond"', async () => {
+    const cfg = kcfg2();
+    let res;
+    await withFetch((url) => {
+      if (url.includes('/oauth2/token')) return tokenOk();
+      const term = new URL(url).searchParams.get('filter.term');
+      if (term === 'nonsense') return json(200, { data: [] });
+      if (term === 'refused') return json(403, { code: 'AUTH-1007' });
+      if (term === 'broken') return json(503, {});
+      throw Object.assign(new Error('socket hang up'), { name: 'TypeError' });
+    }, async () => { res = await kroger.matchTerms(cfg, ['nonsense', 'refused', 'broken', 'silent'], { reason: 'test' }); });
+    assert.strictEqual(res.get('nonsense').kind, 'no_match');
+    assert.strictEqual(res.get('refused').kind, 'signin');
+    assert.strictEqual(res.get('broken').kind, 'no_response');
+    assert.strictEqual(res.get('silent').kind, 'no_response');
+    assert.strictEqual(kroger.FAILURES.no_response, "King Soopers didn't respond");
+    assert.strictEqual(kroger.FAILURES.signin, 'King Soopers sign-in expired');
+    assert.strictEqual(kroger.FAILURES.no_match, 'No match for this item');
+  });
+
+  await test('a refused app token marks every line sign-in expired — never "no match"', async () => {
+    const cfg = kcfg2();
+    let res;
+    const calls = await withFetch(() => json(401, { error: 'invalid_client' }),
+      async () => { res = await kroger.matchTerms(cfg, ['strawberries', 'lime'], { reason: 'test' }); });
+    assert.strictEqual(calls.length, 1, 'one token attempt, then stop');
+    for (const t of ['strawberries', 'lime']) assert.strictEqual(res.get(t).kind, 'signin');
+  });
+
+  await test('a timeout is "didn\'t respond" — the configured timeout is honoured', async () => {
+    const cfg = kcfg2({ kroger: { timeoutMs: 20 } });
+    let res;
+    await withFetch((url, opts) => new Promise((resolve, reject) => {
+      opts.signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })));
+    }), async () => { res = await kroger.matchTerms(cfg, ['strawberries'], { reason: 'test' }); });
+    assert.strictEqual(res.get('strawberries').kind, 'no_response');
+  });
+
+  await test('when Kroger goes silent part-way, the rest are marked at once, not waited out', async () => {
+    const cfg = kcfg2({ kroger: { timeoutMs: 20 } });
+    let res;
+    const calls = await withFetch((url, opts) => (url.includes('/oauth2/token') ? tokenOk() : new Promise((resolve, reject) => {
+      opts.signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })));
+    })), async () => {
+      res = await kroger.matchTerms(cfg, Array.from({ length: 40 }, (_, i) => `item ${i}`), { reason: 'test' });
+    });
+    assert.ok([...res.values()].every((r) => r.kind === 'no_response'));
+    assert.ok(calls.length < 20, `stopped asking after a few silences: ${calls.length} calls`);
+  });
+
+  await test('a slow token endpoint does not unlink the account; a refusal does', async () => {
+    const cfg = kcfg2({ kroger: { timeoutMs: 20 } });
+    kroger.writeRefreshToken(cfg, 'owner-refresh');
+    await withFetch((url, opts) => new Promise((resolve, reject) => {
+      opts.signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })));
+    }), async () => {
+      const out = await kroger.sendCart(cfg, [{ upc: '1', quantity: 1 }]);
+      assert.strictEqual(out.kind, 'no_response');
+      assert.strictEqual(out.error, "King Soopers didn't respond");
+    });
+    assert.strictEqual(kroger.readRefreshToken(cfg), 'owner-refresh', 'kept through a timeout');
+
+    await withFetch(() => json(400, { error: 'invalid_grant' }), async () => {
+      const out = await kroger.sendCart(cfg, [{ upc: '1', quantity: 1 }]);
+      assert.strictEqual(out.error, 'King Soopers sign-in expired');
+    });
+    assert.strictEqual(kroger.readRefreshToken(cfg), null, 'cleared once Kroger refuses it');
+  });
+
+  await test('Send is one PUT of exactly the matched lines, with the owner token', async () => {
+    const cfg = kcfg2();
+    kroger.writeRefreshToken(cfg, 'owner-refresh');
+    const calls = await withFetch((url) => {
+      if (url.includes('/oauth2/token')) return json(200, { access_token: 'owner-access', refresh_token: 'rotated' });
+      return json(204);
+    }, async () => {
+      const out = await kroger.sendCart(cfg, [{ upc: '0003338320027', quantity: 2 }, { upc: '0000000004048', quantity: 3 }]);
+      assert.strictEqual(out.added, 2);
+    });
+    const puts = calls.filter((c) => c.opts.method === 'PUT');
+    assert.strictEqual(puts.length, 1, 'one write, so a failure cannot half-fill the cart');
+    assert.strictEqual(puts[0].url, kroger.ENDPOINTS.cartAdd);
+    assert.strictEqual(puts[0].opts.headers.Authorization, 'Bearer owner-access');
+    assert.deepStrictEqual(JSON.parse(puts[0].opts.body).items.map((i) => [i.upc, i.quantity]),
+      [['0003338320027', 2], ['0000000004048', 3]]);
+    assert.ok(!calls.some((c) => c.url.includes('/products')), 'Send searches nothing');
+    assert.strictEqual(kroger.readRefreshToken(cfg), 'rotated');
+  });
+
+  // --- shopping terms and whole packages ------------------------------------
+
+  await test('recipe lines become shopping terms, with the prep kept as a note', () => {
+    assert.deepStrictEqual(shopterms.splitLine('spring onions, 3, thinly sliced'), { term: 'spring onions', note: '3, thinly sliced' });
+    assert.deepStrictEqual(shopterms.splitLine('a good pinch smoked paprika'), { term: 'smoked paprika', note: 'a good pinch' });
+    assert.strictEqual(shopterms.splitLine('0.13 small white onion').term, 'white onion');
+    assert.strictEqual(shopterms.splitLine('93% lean ground turkey').term, '93% lean ground turkey', 'a percentage is part of the name');
+    assert.strictEqual(shopterms.splitLine('2 cloves garlic, minced').term, 'garlic');
+    assert.strictEqual(shopterms.splitLine('fresh mozzarella (bocconcini)').note, 'bocconcini');
+    assert.strictEqual(shopterms.splitLine('potato or brioche burger buns').term, 'potato buns');
+  });
+
+  await test('quantities become whole packages; pantry amounts round up to one', () => {
+    assert.strictEqual(shopterms.packageCount(['1300 g'], '1 lb'), 3);
+    assert.strictEqual(shopterms.packageCount(['1.25 x 400 g can'], '15.5 oz'), 2);
+    assert.strictEqual(shopterms.packageCount(['1/2', '1 large', '0.25 large'], '1 each'), 2);
+    assert.strictEqual(shopterms.packageCount(['a pinch'], '2.12 oz'), 1, 'a pinch is one jar');
+    assert.strictEqual(shopterms.packageCount(['1/2 tsp', '0.13 tsp'], '2.12 oz'), 1, 'teaspoons against a weight is one jar');
+    assert.strictEqual(shopterms.packageCount(['0.13 small'], '1 lb'), 1, 'a fraction of an onion is still a bag');
+    assert.strictEqual(shopterms.packageCount([], null), 1);
+    // Found on the throwaway build: cloves are not bulbs, and "4, about 200 g
+    // each" is 800 g of chicken, not four packs or one.
+    assert.strictEqual(shopterms.packageCount(['2 cloves', '1 clove', '4 cloves', '6 cloves'], '1 ct'), 2);
+    assert.strictEqual(shopterms.packageCount(['4, about 200 g each'], '1 lb'), 2);
+    assert.strictEqual(shopterms.packageCount(['4 x 6 oz'], '12 oz'), 2);
+    for (const n of [shopterms.packageCount(['999 kg'], '1 oz'), shopterms.packageCount(['1 g'], '1 lb')]) {
+      assert.ok(Number.isInteger(n) && n >= 1 && n <= 24, String(n));
+    }
+  });
+
+  // --- the build: merge, match, count ---------------------------------------
+
+  function plannedStore(week, recipes) {
+    const s = new Store(tmpDir()).load();
+    const days = planner.weekDates(week).filter((d) => !planner.isSunday(d));
+    recipes.forEach((r, i) => {
+      const rec = s.addRecipe({ name: r.name, servings: 1, ingredients: r.ingredients, steps: ['Cook.'] });
+      planner.assign(s, week, { date: days[i], slot: 'dinner', foodId: rec.id, servings: 1 });
+    });
+    return s;
+  }
+
+  const ONION_WEEK = '2026-09-21';
+  const onionRecipes = [
+    { name: 'Kofta', ingredients: [{ name: 'white onion', quantity: '0.13 small' }, { name: 'strawberries', quantity: '6' }] },
+    { name: 'Salsa', ingredients: [{ name: 'yellow onion', quantity: '1' }, { name: 'lime', quantity: '1/2, juiced' }] },
+  ];
+  const onionTerms = { 'white onion': { term: 'onions' }, 'yellow onion': { term: 'onions' } };
+  const catalogue = {
+    onions: [product('4093', 'Jumbo Yellow Onions', '1 each'), product('4663', 'White Onions', '1 each')],
+    strawberries: [product('0003338320027', 'Fresh Strawberries – 1 LB Clamshell', '1 lb')],
+    lime: [product('4048', 'Fresh Large Limes - Each', '1 each')],
+    limes: [product('4048', 'Fresh Large Limes - Each', '1 each')],
+    'key limes': [product('4048', 'Fresh Large Limes - Each', '1 each')],
+  };
+  const spyMatch = (seen) => async (terms, reason) => {
+    seen.push({ terms: [...terms], reason });
+    return new Map(terms.map((t) => [t, catalogue[t.toLowerCase()]
+      ? { candidates: catalogue[t.toLowerCase()].map((p) => ({ upc: p.upc, description: p.description, brand: p.brand, size: p.items[0].size })) }
+      : { kind: 'no_match' }]));
+  };
+
+  await test('onions from two recipes merge into one line, every line matched with a whole count', async () => {
+    const s = plannedStore(ONION_WEEK, onionRecipes);
+    const seen = [];
+    let list;
+    await withModel(onionTerms, async () => {
+      list = await shoppinglist.generate(s, CFG, ONION_WEEK, { match: spyMatch(seen), reason: 'create' });
+    });
+    const onions = list.items.filter((i) => /onion/i.test(i.name));
+    assert.strictEqual(onions.length, 1, list.items.map((i) => i.name).join(', '));
+    assert.deepStrictEqual(onions[0].fromRecipes.sort(), ['Kofta', 'Salsa']);
+    assert.ok(/0\.13 small/.test(onions[0].quantity) && /\b1\b/.test(onions[0].quantity), 'both quantities carried');
+    assert.ok(/white onion/.test(onions[0].note) && /yellow onion/.test(onions[0].note), 'the recipe wording stays visible');
+    for (const i of list.items) {
+      assert.ok(i.match, `${i.name} is matched`);
+      assert.ok(Number.isInteger(i.count) && i.count >= 1, `${i.name} has a whole count`);
+    }
+    assert.strictEqual(seen.length, 1, 'one search batch for the build');
+    assert.strictEqual(seen[0].reason, 'create');
+    assert.ok(seen[0].terms.every((t) => !/,|\d/.test(t)), `terms are shopping terms: ${seen[0].terms}`);
+  });
+
+  await test('two different terms that resolve to the same product become one line', async () => {
+    const s = plannedStore(ONION_WEEK, [
+      { name: 'A', ingredients: [{ name: 'lime', quantity: '1' }] },
+      { name: 'B', ingredients: [{ name: 'limes', quantity: '2' }] },
+    ]);
+    let list;
+    await withModel({ lime: { term: 'lime' }, limes: { term: 'key limes' } }, async () => {
+      const match = async (terms) => new Map(terms.map((t) => [t, { candidates: [{ upc: '4048', description: 'Limes', brand: null, size: '1 each' }] }]));
+      list = await shoppinglist.generate(s, CFG, ONION_WEEK, { match });
+    });
+    assert.strictEqual(list.items.length, 1);
+    assert.strictEqual(list.items[0].count, 3, '1 + 2 limes, carried');
+  });
+
+  await test('a hand-added item is matched as it is added; a duplicate joins its line', async () => {
+    const s = plannedStore(ONION_WEEK, onionRecipes);
+    const seen = [];
+    await withModel(onionTerms, () => shoppinglist.generate(s, CFG, ONION_WEEK, { match: spyMatch(seen) }));
+    const before = s.getShoppingList(ONION_WEEK).items.length;
+
+    // A new name: one search, reason "add", matched on the spot.
+    let out = await shoppinglist.edit(s, ONION_WEEK, 'add', { name: 'key limes' }, { match: spyMatch(seen) });
+    const last = seen[seen.length - 1];
+    assert.strictEqual(last.reason, 'add');
+    assert.deepStrictEqual(last.terms, ['key limes']);
+    // ...which resolves to the same product as the recipe's "lime": one line.
+    assert.strictEqual(out.list.items.length, before, 'merged by product, not added twice');
+    const lime = out.list.items.find((i) => i.match && i.match.upc === '4048');
+    assert.ok(lime.count >= 2, `combined count: ${lime.count}`);
+
+    // Already on the list by name: no second line, the count goes up.
+    const onion = out.list.items.find((i) => /onion/.test(i.name));
+    const c0 = onion.count;
+    out = await shoppinglist.edit(s, ONION_WEEK, 'add', { name: 'Onions' }, { match: spyMatch(seen) });
+    assert.strictEqual(out.list.items.filter((i) => /onion/i.test(i.name)).length, 1);
+    assert.strictEqual(out.list.items.find((i) => /onion/.test(i.name)).count, c0 + 1);
+    assert.ok(out.merged);
+
+    // Something new and unknown: kept, marked, never sent.
+    out = await shoppinglist.edit(s, ONION_WEEK, 'add', { name: 'zzqx flarn' }, { match: spyMatch(seen) });
+    const odd = out.list.items.find((i) => i.name === 'zzqx flarn');
+    assert.strictEqual(odd.status, 'no_match');
+    const send = shoppinglist.forKroger(out.list);
+    assert.ok(!send.lines.some((l) => l.name === 'zzqx flarn'), 'not sent');
+    assert.ok(send.skipped.some((l) => l.name === 'zzqx flarn' && l.why === 'No match for this item'));
+  });
+
+  await test('the owner can pick another returned match, or set the count', async () => {
+    const s = plannedStore(ONION_WEEK, onionRecipes);
+    await withModel(onionTerms, () => shoppinglist.generate(s, CFG, ONION_WEEK, { match: spyMatch([]) }));
+    const onion = s.getShoppingList(ONION_WEEK).items.find((i) => /onion/.test(i.name));
+    let out = await shoppinglist.edit(s, ONION_WEEK, 'choose', { key: onion.key, upc: '4663' });
+    assert.strictEqual(out.list.items.find((i) => i.key === onion.key).match.description, 'White Onions');
+    assert.ok((await shoppinglist.edit(s, ONION_WEEK, 'choose', { key: onion.key, upc: 'not-offered' })).error,
+      'only a returned candidate can be chosen');
+    out = await shoppinglist.edit(s, ONION_WEEK, 'count', { key: onion.key, count: '4' });
+    assert.strictEqual(out.list.items.find((i) => i.key === onion.key).count, 4);
+    assert.ok((await shoppinglist.edit(s, ONION_WEEK, 'count', { key: onion.key, count: '0' })).error);
+  });
+
+  await test('NO SEARCH outside create, rebuild and add — edits never call the search', async () => {
+    const s = plannedStore(ONION_WEEK, onionRecipes);
+    await withModel(onionTerms, () => shoppinglist.generate(s, CFG, ONION_WEEK, { match: spyMatch([]) }));
+    const seen = [];
+    const key = s.getShoppingList(ONION_WEEK).items[0].key;
+    for (const [action, payload] of [['toggle', { key }], ['toggle', { key }], ['quantity', { key, quantity: '2' }],
+      ['count', { key, count: 2 }], ['remove', { key }]]) {
+      await shoppinglist.edit(s, ONION_WEEK, action, payload, { match: spyMatch(seen) });
+    }
+    assert.strictEqual(seen.length, 0, 'toggle, quantity, count and remove searched nothing');
+    shoppinglist.isStale(s, CFG, s.getShoppingList(ONION_WEEK));
+    assert.strictEqual(seen.length, 0, 'nor does checking for staleness');
+
+    // And in the wiring: the search is handed only to generate and to edit
+    // (where only 'add' uses it), and nothing scheduled can reach it.
+    const srv = fs.readFileSync(path.join(ROOT, 'server.js'), 'utf8');
+    assert.strictEqual((srv.match(/kroger\.matchTerms\(/g) || []).length, 1, 'one place builds the search');
+    const uses = srv.match(/match: krogerMatch/g) || [];
+    assert.strictEqual(uses.length, 2, 'used by generate and by item edits only');
+    const getRoute = /if \(method === 'GET' && p === '\/api\/shopping'\) \{[\s\S]*?\n  \}/.exec(srv)[0];
+    assert.ok(!/krogerMatch|generate\(/.test(getRoute), 'opening the list never searches or rebuilds');
+    for (const f of ['lib/briefing.js', 'bin/briefing.js', 'lib/planner.js']) {
+      const src = fs.readFileSync(path.join(ROOT, f), 'utf8');
+      assert.ok(!/matchTerms|require\(['"]\.\/kroger['"]\)|shoppinglist\.generate/.test(src), `${f} cannot search`);
+    }
+    const dc = fs.readFileSync(path.join(ROOT, 'lib/dietcoach.js'), 'utf8');
+    assert.strictEqual((dc.match(/kroger\.matchTerms\(/g) || []).length, 1, 'chat searches only in create_shopping_list');
+  });
+
+  await test('a build with every search refused says sign-in expired on each line, not "no matches"', async () => {
+    const s = plannedStore(ONION_WEEK, onionRecipes);
+    let list;
+    await withModel(onionTerms, async () => {
+      list = await shoppinglist.generate(s, CFG, ONION_WEEK, {
+        match: async (terms) => new Map(terms.map((t) => [t, { kind: 'signin' }])),
+      });
+    });
+    const { skipped, lines } = shoppinglist.forKroger(list);
+    assert.strictEqual(lines.length, 0);
+    assert.ok(skipped.every((x) => x.why === 'King Soopers sign-in expired'), JSON.stringify(skipped));
+    assert.ok(/not matched at King Soopers/.test(shoppinglist.asText(list)), 'and Copy still works, marked');
+  });
+
+  await test('tap water and ice start unticked — visible, not sent', async () => {
+    const s = plannedStore(ONION_WEEK, [{ name: 'A', ingredients: [{ name: 'cold water', quantity: '4 tbsp' }, { name: 'lime', quantity: '1' }] }]);
+    let list;
+    await withModel({ 'cold water': { term: 'water', not_bought: true } }, async () => {
+      list = await shoppinglist.generate(s, CFG, ONION_WEEK, { match: spyMatch([]) });
+    });
+    const water = list.items.find((i) => i.name === 'water');
+    assert.strictEqual(water.included, false);
+    assert.ok(list.items.find((i) => i.name === 'lime').included, 'everything else still starts ticked');
+    assert.ok(!shoppinglist.forKroger(list).lines.some((l) => l.name === 'water'));
+  });
+
+  await test('without the model, the plain-code split still makes a usable list', async () => {
+    const s = plannedStore(ONION_WEEK, [{ name: 'A', ingredients: [{ name: 'garlic cloves, peeled', quantity: '6' }] }]);
+    const real = claude.complete;
+    claude.complete = async () => { throw new Error('no model'); };
+    try {
+      const list = await shoppinglist.generate(s, CFG, ONION_WEEK, {});
+      assert.strictEqual(list.items[0].name, 'garlic cloves');
+      assert.strictEqual(list.items[0].note, 'peeled');
+      assert.strictEqual(list.items[0].status, 'not_searched');
+    } finally { claude.complete = real; }
+  });
+
+  // --- Decision 12: stale lists -------------------------------------------
+
+  await test('a plan change marks the list stale, keeps the edits, and Rebuild clears it', async () => {
+    const s = plannedStore(ONION_WEEK, onionRecipes);
+    await withModel(onionTerms, () => shoppinglist.generate(s, CFG, ONION_WEEK, { match: spyMatch([]) }));
+    let list = s.getShoppingList(ONION_WEEK);
+    assert.strictEqual(shoppinglist.isStale(s, CFG, list), false, 'fresh after a build');
+
+    const key = list.items[0].key;
+    await shoppinglist.edit(s, ONION_WEEK, 'toggle', { key });
+    assert.strictEqual(shoppinglist.isStale(s, CFG, s.getShoppingList(ONION_WEEK)), false, 'an edit is not a plan change');
+
+    const extra = s.addRecipe({ name: 'Soup', servings: 1, ingredients: [{ name: 'carrots', quantity: '2' }], steps: ['x'] });
+    planner.assign(s, ONION_WEEK, { date: planner.weekDates(ONION_WEEK)[3], slot: 'lunch', foodId: extra.id, servings: 1 });
+    list = s.getShoppingList(ONION_WEEK);
+    assert.strictEqual(shoppinglist.isStale(s, CFG, list), true, 'the grid moved on');
+    assert.strictEqual(list.items.find((i) => i.key === key).included, false, 'and the untick is still there');
+
+    await withModel(onionTerms, () => shoppinglist.generate(s, CFG, ONION_WEEK, { match: spyMatch([]), reason: 'rebuild' }));
+    list = s.getShoppingList(ONION_WEEK);
+    assert.strictEqual(shoppinglist.isStale(s, CFG, list), false, 'Rebuild clears it');
+    assert.ok(list.items.some((i) => /carrot/.test(i.name)), 'and reflects the grid');
+  });
+
+  await test('a list saved before fingerprints existed is treated as stale', () => {
+    const s = new Store(tmpDir()).load();
+    assert.strictEqual(shoppinglist.isStale(s, CFG, { weekStart: ONION_WEEK, items: [] }), true);
+  });
+
+  await test('the page shows the stale line and the three failure states in plain words', () => {
+    const page = fs.readFileSync(path.join(ROOT, 'public/index.html'), 'utf8');
+    assert.ok(page.includes('Your plan changed since this list was made'), 'the stale line');
+    const panel = /function shoppingPanel\(\) \{[\s\S]*?\n\}/.exec(page)[0];
+    assert.ok(/shop\.stale[\s\S]{0,400}'Rebuild'/.test(panel), 'with a Rebuild button');
+    for (const t of ["King Soopers didn't respond", 'King Soopers sign-in expired', 'No match for this item']) {
+      assert.ok(page.includes(t), t);
+    }
+    // Opening the list must not rebuild it: generate only when there is none.
+    const open = /async function openShopping\(\) \{[\s\S]*?\n\}/.exec(page)[0];
+    assert.ok(/if \(!shop\.data\) await generateShopping\(\)/.test(open), open);
+    // Product names are King Soopers data: text only, never markup.
+    const row = /function shopRow\(item\) \{[\s\S]*?\n\}/.exec(page)[0];
+    assert.ok(!/innerHTML/.test(row), 'no innerHTML in the review row');
+  });
+}
+
 async function recipeBuilderTests() {
   await test('exactly the seven locked modes, in the specced order', () => {
     assert.deepStrictEqual(recipebuilder.MODE_IDS, [
@@ -2666,8 +3151,9 @@ async function planPlumbingTests() {
     const text = shoppinglist.asText(list);
     assert.ok(/Oats/.test(text) && /Milk/.test(text));
     assert.ok(!/Onions/.test(text), 'an unticked item must not reach the copied text');
-    const kroger = shoppinglist.forKroger(list);
-    assert.deepStrictEqual(kroger.map((i) => i.name), ['Oats', 'Milk'],
+    for (const i of list.items) i.match = { upc: `u-${i.key}`, description: i.name, size: null };
+    const out = shoppinglist.forKroger(list);
+    assert.deepStrictEqual(out.lines.map((i) => i.name), ['Oats', 'Milk'],
       'nor the cart — that is the whole point of the review');
   });
 
@@ -2699,14 +3185,14 @@ async function planPlumbingTests() {
     assert.ok(/\.shop-row\.off/.test(page), 'and are styled as set aside, not gone');
   });
 
-  await test('editing the review keeps it — a cull is a decision, not UI state', () => {
+  await test('editing the review keeps it — a cull is a decision, not UI state', async () => {
     const s = new Store(tmpDir()).load();
     const week = '2026-09-21';
     s.setShoppingList(week, {
       weekStart: week, generatedAt: new Date().toISOString(),
       items: [{ key: 'a', name: 'Oats', quantity: '', category: 'Dry goods', included: true, fromRecipes: [] }],
     });
-    shoppinglist.edit(s, week, 'toggle', { key: 'a' });
+    await shoppinglist.edit(s, week, 'toggle', { key: 'a' });
     assert.strictEqual(s.getShoppingList(week).items[0].included, false);
     // ...and it survives a reload, like everything else in the store.
     const again = new Store(s.dataDir);
@@ -2714,24 +3200,24 @@ async function planPlumbingTests() {
     assert.strictEqual(again.getShoppingList(week).items[0].included, false);
   });
 
-  await test('an item can be added by hand, and removed entirely', () => {
+  await test('an item can be added by hand, and removed entirely', async () => {
     const s = new Store(tmpDir()).load();
     const week = '2026-09-21';
     s.setShoppingList(week, { weekStart: week, items: [] });
-    shoppinglist.edit(s, week, 'add', { name: 'Washing up liquid' });
+    await shoppinglist.edit(s, week, 'add', { name: 'Washing up liquid' });
     const added = s.getShoppingList(week).items[0];
     assert.strictEqual(added.name, 'Washing up liquid');
     assert.strictEqual(added.included, true);
     assert.strictEqual(added.manual, true, 'marked so a rebuild can say what it is about to lose');
-    shoppinglist.edit(s, week, 'quantity', { key: added.key, quantity: '1 bottle' });
+    await shoppinglist.edit(s, week, 'quantity', { key: added.key, quantity: '1 bottle' });
     assert.strictEqual(s.getShoppingList(week).items[0].quantity, '1 bottle');
-    shoppinglist.edit(s, week, 'remove', { key: added.key });
+    await shoppinglist.edit(s, week, 'remove', { key: added.key });
     assert.strictEqual(s.getShoppingList(week).items.length, 0);
   });
 
-  await test('editing a list that does not exist is refused, not invented', () => {
+  await test('editing a list that does not exist is refused, not invented', async () => {
     const s = new Store(tmpDir()).load();
-    assert.ok(shoppinglist.edit(s, '2026-09-21', 'toggle', { key: 'x' }).error);
+    assert.ok((await shoppinglist.edit(s, '2026-09-21', 'toggle', { key: 'x' })).error);
   });
 
   await test('the review reaches nothing outside the app', () => {
@@ -3653,6 +4139,7 @@ async function main() {
   await ateToPlanTests();
   await planIntegrationTests();
   await krogerTests();
+  await listQualityTests();
   await recipeTests();
   await urlImportTests();
   await recipeBuilderTests();

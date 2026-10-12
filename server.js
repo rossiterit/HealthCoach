@@ -769,17 +769,26 @@ async function route(req, res, url) {
   // the same kind of checkpoint the planner's Apply is: the Kroger send below
   // carries exactly what the owner ticked and nothing else.
 
+  // The product search, handed to the list builder for the three owner actions
+  // that may run it (Decision 11): create, rebuild, add by hand. Nothing else
+  // in this file passes it, so page loads and grid edits cannot search.
+  const krogerMatch = (terms, reason) => kroger.matchTerms(cfg, terms, { reason });
+
+  const shoppingPayload = (weekStart, list, extra = {}) => ({
+    weekStart,
+    list,
+    grouped: list ? shoppinglist.grouped(list) : [],
+    categories: shoppinglist.CATEGORIES,
+    text: list ? shoppinglist.asText(list) : '',
+    // Decision 12: said, never fixed. Local only — no search.
+    stale: list ? shoppinglist.isStale(store, cfg, list) : false,
+    ...extra,
+  });
+
   if (method === 'GET' && p === '/api/shopping') {
     const weeks = planner.plannableWeeks(new Date(), cfg.timezone);
     const weekStart = weeks.includes(url.searchParams.get('week')) ? url.searchParams.get('week') : weeks[0];
-    const list = shoppinglist.get(store, weekStart);
-    return send(res, 200, {
-      weekStart,
-      list,
-      grouped: list ? shoppinglist.grouped(list) : [],
-      categories: shoppinglist.CATEGORIES,
-      text: list ? shoppinglist.asText(list) : '',
-    });
+    return send(res, 200, shoppingPayload(weekStart, shoppinglist.get(store, weekStart)));
   }
 
   if (method === 'POST' && p === '/api/shopping/generate') {
@@ -789,29 +798,21 @@ async function route(req, res, url) {
     // Regenerating RESETS any review. The caller is told so it can say so —
     // a silent reset would quietly undo a cull the owner had already made.
     const had = Boolean(shoppinglist.get(store, weekStart));
-    const list = await shoppinglist.generate(store, cfg, weekStart);
-    return send(res, 200, {
-      weekStart,
-      list,
-      grouped: shoppinglist.grouped(list),
-      categories: shoppinglist.CATEGORIES,
-      text: shoppinglist.asText(list),
-      replacedAReview: had,
+    const list = await shoppinglist.generate(store, cfg, weekStart, {
+      match: krogerMatch,
+      reason: had ? 'rebuild' : 'create',
     });
+    return send(res, 200, shoppingPayload(weekStart, list, { replacedAReview: had }));
   }
 
   if (method === 'POST' && p === '/api/shopping/item') {
     const body = await readJson(req);
     const weeks = planner.plannableWeeks(new Date(), cfg.timezone);
     const weekStart = weeks.includes(body.week) ? body.week : weeks[0];
-    const out = shoppinglist.edit(store, weekStart, body.action, body);
+    // Only 'add' ever searches; the builder ignores `match` for every other edit.
+    const out = await shoppinglist.edit(store, weekStart, body.action, body, { match: krogerMatch });
     if (out.error) return send(res, 400, { error: out.error });
-    return send(res, 200, {
-      weekStart,
-      list: out.list,
-      grouped: shoppinglist.grouped(out.list),
-      text: shoppinglist.asText(out.list),
-    });
+    return send(res, 200, shoppingPayload(weekStart, out.list, { merged: out.merged || null }));
   }
 
   if (method === 'POST' && p === '/api/shopping/send') {
@@ -821,16 +822,30 @@ async function route(req, res, url) {
     const list = shoppinglist.get(store, weekStart);
     if (!list) return send(res, 400, { error: 'There is no list to send yet.' });
 
-    // ONLY the ticked items. This is the whole point of the review step.
-    const items = shoppinglist.forKroger(list);
-    if (!items.length) return send(res, 400, { error: 'Nothing is ticked, so there is nothing to send.' });
-
-    const out = await kroger.sendList(cfg, items);
-    if (out.error) {
-      // Fail closed exactly as v3 does: the plain list always works.
-      return send(res, 200, { ok: false, error: out.error, text: shoppinglist.asText(list), sent: 0 });
+    // ONLY the ticked, matched lines, as the UPCs and counts the owner saw.
+    // No search happens here (Decision 11): the review IS what gets sent.
+    const plan2 = shoppinglist.forKroger(list);
+    if (!plan2.lines.length) {
+      const why = shoppinglist.included(list).length
+        ? 'Nothing ticked has a King Soopers match, so there is nothing to send.'
+        : 'Nothing is ticked, so there is nothing to send.';
+      return send(res, 400, { error: why });
     }
-    return send(res, 200, { ok: true, message: kroger.echo(out), added: out.added, sent: items.length });
+
+    const out = await kroger.sendCart(cfg, plan2.lines);
+    // Fail closed exactly as before: the cart is untouched and the plain list
+    // always works.
+    return send(res, 200, {
+      ok: !out.error,
+      kind: out.kind || null,
+      message: shoppinglist.summarise(out, plan2),
+      added: out.error ? [] : plan2.lines.map((l) => ({ name: l.name, product: l.product, quantity: l.quantity })),
+      notAdded: out.error
+        ? plan2.lines.map((l) => ({ name: l.name, why: out.error })).concat(plan2.skipped)
+        : plan2.skipped,
+      text: shoppinglist.asText(list),
+      sent: out.error ? 0 : plan2.lines.length,
+    });
   }
 
   // --- the one-time Kroger authorisation (v3 F5, Decision 8) --------------

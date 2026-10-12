@@ -580,7 +580,24 @@
   }
   .shop-cat.off { color: var(--muted); opacity: .75; }
   .shop-items { display: grid; gap: 2px; }
-  .shop-row { display: grid; grid-template-columns: 26px 1fr 96px 26px; gap: 8px; align-items: center; padding: 3px 0; }
+  .shop-row { display: grid; grid-template-columns: 26px 1fr 64px 26px; gap: 8px; align-items: start; padding: 5px 0; }
+  .shop-row > .tick, .shop-row > .qty, .shop-row > .del { margin-top: 1px; }
+  /* v5 F5: each line shows the King Soopers product it will send, or why not. */
+  .shop-row .main { min-width: 0; display: grid; gap: 2px; }
+  .shop-row .sub { font-size: 11px; color: var(--muted); overflow-wrap: anywhere; }
+  .shop-row .prod { font-size: 12px; color: var(--ink); overflow-wrap: anywhere; }
+  .shop-row .prod.none { color: var(--ac-clay); }
+  .shop-row select.pick {
+    font: inherit; font-size: 11px; padding: 2px 4px; max-width: 100%; min-width: 0;
+    border: 1px solid var(--line); border-radius: 3px; background: var(--paper); color: var(--muted);
+  }
+  .shop-row.off .prod, .shop-row.off select.pick { opacity: .6; }
+  .shop-stale {
+    display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: space-between;
+    font-size: 13px; padding: 8px 10px; margin: 6px 0 4px;
+    border: 1px solid var(--ac-clay); border-radius: 3px; background: var(--paper); color: var(--ink);
+  }
+  #shop-msg { white-space: pre-line; }
   /* An unticked row stays visible and one tap from coming back: hiding it
      would make an accidental untick feel like a deletion. */
   .shop-row.off .nm { color: var(--muted); text-decoration: line-through; }
@@ -606,7 +623,7 @@
     border: 1px solid var(--line); border-radius: 3px; background: var(--paper); color: var(--ink);
   }
   @media (max-width: 560px) {
-    .shop-row { grid-template-columns: 26px 1fr 70px 24px; gap: 6px; }
+    .shop-row { grid-template-columns: 26px 1fr 52px 24px; gap: 6px; }
     .shop-row .qty { font-size: 12px; }
   }
 
@@ -2040,18 +2057,34 @@ async function applyProposal(dates, discard) {
 // Unticking is silent: no confirmation, no explanation, no note about which
 // meal an item came from. The no-guilt rule covers shopping too.
 
-const shop = { open: false, busy: false, data: null, grouped: [], msg: '', warn: false, adding: '' };
+const shop = { open: false, busy: false, data: null, grouped: [], msg: '', warn: false, adding: '', stale: false };
+
+// v5 F5 (Decision 11e): what a line's match state means, in the same words the
+// server uses. Kept apart on purpose — an outage is never shown as "no match".
+const SHOP_STATUS = {
+  no_response: "King Soopers didn't respond",
+  signin: 'King Soopers sign-in expired',
+  no_match: 'No match for this item',
+  not_searched: 'Not matched yet — Rebuild to match it',
+};
+
+function takeShopping(out) {
+  shop.data = out.list;
+  shop.grouped = out.grouped || [];
+  shop.stale = Boolean(out.stale);
+}
 
 async function openShopping() {
   shop.open = true;
   shop.msg = '';
   renderPlan();
   try {
+    // Opening the list never searches and never rebuilds (Decisions 11, 12):
+    // it shows the saved list, and says so if the plan has moved on.
     const out = await planApi('/shopping?week=' + encodeURIComponent(plan.week));
-    shop.data = out.list;
-    shop.grouped = out.grouped || [];
+    takeShopping(out);
     // No list yet for this week: make one straight away rather than showing an
-    // empty box with a second button in it.
+    // empty box with a second button in it. That is the owner's Create.
     if (!shop.data) await generateShopping();
     else renderPlan();
   } catch (e) { shop.msg = e.message; shop.warn = true; renderPlan(); }
@@ -2059,12 +2092,11 @@ async function openShopping() {
 
 async function generateShopping() {
   shop.busy = true; shop.warn = false;
-  shop.msg = 'Working out what you need…';
+  shop.msg = 'Working out what you need and matching it at King Soopers…';
   renderPlan();
   try {
     const out = await planApi('/shopping/generate', { week: plan.week });
-    shop.data = out.list;
-    shop.grouped = out.grouped || [];
+    takeShopping(out);
     shop.busy = false;
     shop.msg = out.replacedAReview
       ? 'Rebuilt from the plan — that replaced the list you had already been through.'
@@ -2075,9 +2107,10 @@ async function generateShopping() {
 
 async function shopEdit(action, payload) {
   try {
+    if (action === 'add') { shop.warn = false; shop.msg = 'Matching it at King Soopers…'; renderPlan(); }
     const out = await planApi('/shopping/item', { week: plan.week, action, ...payload });
-    shop.data = out.list;
-    shop.grouped = out.grouped || [];
+    takeShopping(out);
+    if (action === 'add') shop.msg = out.merged ? 'That was already on the list — added to that line.' : '';
     renderPlan();
   } catch (e) { shop.warn = true; shop.msg = e.message; renderPlan(); }
 }
@@ -2100,6 +2133,18 @@ function shoppingPanel() {
     box.appendChild(el('div', 'rc-msg', shop.msg || 'Working…'));
     return box;
   }
+
+  // Decision 12: one plain line, the owner's edits kept, no automatic rebuild.
+  if (shop.data && shop.stale) {
+    const bar = el('div', 'shop-stale');
+    bar.id = 'shop-stale';
+    bar.appendChild(el('span', null, 'Your plan changed since this list was made —'));
+    const rb = el('button', 'rc-btn', 'Rebuild');
+    rb.addEventListener('click', generateShopping);
+    bar.appendChild(rb);
+    box.appendChild(bar);
+  }
+
   if (!shop.data || !shop.data.items.length) {
     box.appendChild(el('div', 'rc-empty',
       'Nothing planned for this week yet, so there is nothing to buy. Fill in some days and come back.'));
@@ -2126,7 +2171,7 @@ function shoppingPanel() {
     box.appendChild(ul);
   }
 
-  // Add something the plan never knew about.
+  // Add something the plan never knew about. It is matched as it is added.
   const addRow = el('div', 'shop-add');
   const input = el('input');
   input.placeholder = 'Add something else — washing up liquid, bananas…';
@@ -2151,9 +2196,10 @@ function shoppingPanel() {
   copy.addEventListener('click', copyShopping);
   foot.appendChild(copy);
 
+  const sendable = shop.data.items.filter((i) => i.included && i.match).length;
   const send = el('button', 'rc-btn primary', 'Send to King Soopers');
   send.id = 'shop-send';
-  send.disabled = !n;
+  send.disabled = !sendable;
   send.addEventListener('click', sendShopping);
   foot.appendChild(send);
 
@@ -2169,8 +2215,16 @@ function shoppingPanel() {
   return box;
 }
 
+// Same wording as the server's productLabel: Kroger's description carries the
+// brand where it matters, so the brand field is not prepended.
+function productText(m) {
+  if (!m) return '';
+  return `${m.description}${m.size ? `, ${m.size}` : ''}`;
+}
+
 function shopRow(item) {
   const row = el('div', 'shop-row' + (item.included ? '' : ' off'));
+  row.dataset.key = item.key;
 
   const tick = el('button', 'tick' + (item.included ? ' on' : ''));
   tick.type = 'button';
@@ -2182,13 +2236,43 @@ function shopRow(item) {
   tick.addEventListener('click', () => shopEdit('toggle', { key: item.key }));
   row.appendChild(tick);
 
-  row.appendChild(el('span', 'nm', item.name));
+  // The shopping term, what the recipes asked for, and the prep note — all
+  // plain text. Product names below come from King Soopers and are shown as
+  // text only, never as markup.
+  const main = el('div', 'main');
+  main.appendChild(el('span', 'nm', item.name));
+  const need = [item.quantity, item.note].filter(Boolean).join(' · ');
+  if (need) main.appendChild(el('span', 'sub', need));
+  if (item.match) {
+    main.appendChild(el('span', 'prod', `${productText(item.match)} ×${item.count || 1}`));
+    const cands = item.candidates || [];
+    if (cands.length > 1) {
+      const pick = el('select', 'pick');
+      pick.setAttribute('aria-label', `Pick a different product for ${item.name}`);
+      cands.forEach((c) => {
+        const o = el('option', null, productText(c));
+        o.value = c.upc;
+        if (c.upc === item.match.upc) o.selected = true;
+        pick.appendChild(o);
+      });
+      pick.addEventListener('change', () => shopEdit('choose', { key: item.key, upc: pick.value }));
+      main.appendChild(pick);
+    }
+  } else {
+    main.appendChild(el('span', 'prod none', `${SHOP_STATUS[item.status] || SHOP_STATUS.not_searched} — won't be sent`));
+  }
+  row.appendChild(main);
 
+  // Whole packages of the matched product (Decision 11b).
   const qty = el('input', 'qty');
-  qty.value = item.quantity || '';
-  qty.placeholder = '—';
-  qty.setAttribute('aria-label', `Quantity for ${item.name}`);
-  qty.addEventListener('change', () => shopEdit('quantity', { key: item.key, quantity: qty.value }));
+  qty.type = 'number';
+  qty.min = '1';
+  qty.max = '24';
+  qty.step = '1';
+  qty.value = String(item.count || 1);
+  qty.disabled = !item.match;
+  qty.setAttribute('aria-label', `How many packages of ${item.name}`);
+  qty.addEventListener('change', () => shopEdit('count', { key: item.key, count: qty.value }));
   row.appendChild(qty);
 
   const del = el('button', 'del', '×');
@@ -2235,8 +2319,9 @@ async function sendShopping() {
   renderPlan();
   try {
     const out = await planApi('/shopping/send', { week: plan.week });
+    // One plain summary either way (Decision 11f): what went, what didn't, why.
     shop.warn = !out.ok;
-    shop.msg = out.ok ? out.message : `${out.error} The list is still here to copy.`;
+    shop.msg = out.message || out.error || '';
     renderPlan();
   } catch (e) { shop.warn = true; shop.msg = e.message; renderPlan(); }
 }
