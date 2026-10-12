@@ -59,7 +59,9 @@ when Kroger actually refuses it.
   and edits stay until you tap Rebuild. It never rebuilds on its own.
 - **Tap water and ice start unticked.** Found while testing: a recipe's "cold
   water" matched a 40-bottle case. They now sit under *Not buying*, one tap
-  from coming back, and everything else still starts ticked.
+  from coming back, and everything else still starts ticked. **Owner decision,
+  approved 2026-10-12** — a deliberate exception to Decision 9's "everything
+  starts ticked".
 
 ## When King Soopers is contacted
 
@@ -111,7 +113,32 @@ API** with read-only searches:
 The throwaway had **no Kroger link**, so it couldn't touch a cart. The real cart
 add, and the live checks below, happen on the live site.
 
-**Live checks:** *(pending — filled in after deploy)*
+## Live acceptance — 2026-10-12, on gotkapp.com with your real cart
+
+Deployed as `fc4d4ff` (PR #17) at 17:27 UTC. Your cart was emptied first.
+
+- [x] **Root cause named** (above). Strawberries, limes and yellow onion were
+  each hand-added and **matched as they were added**: Fresh Strawberries – 1 LB
+  Clamshell, Fresh Large Limes – Each, and Jumbo Yellow Onions.
+- [x] **Duplicate merge:** adding "yellow onion" a second time joined the
+  existing line (**×2**) with no new search. *Onions merging across two
+  recipes* was verified on the throwaway and by test, not live: your week had
+  no recipes planned.
+- [x] **You pressed Send.** The summary listed all 3 lines, and your cart holds
+  exactly **strawberries ×1, limes ×1, yellow onions ×2 ($5.39)**. The log
+  shows one cart write of 3 lines and no search at Send. Your Kroger link
+  refreshed and is still linked.
+- [x] **Logs:** since the deploy, exactly 3 Products searches, all `reason=add`.
+  None from page loads, opening the list, the schedule or the briefing.
+- [x] **Forced failures — verified on the throwaway, not repeated live (owner
+  decision, 2026-10-12):** a wrong client secret gave "King Soopers sign-in
+  expired" (HTTP 401), a 1 ms timeout gave "King Soopers didn't respond", and
+  a nonsense item gave "No match for this item". None was sent, and none read
+  as "no matches".
+- [x] **Stale notice:** verified on the throwaway (a grid edit, the notice
+  appeared, edits kept, Rebuild cleared it) and by test. It wasn't exercised
+  live because your week has no plan yet. You'll see it the first time you
+  change a planned week after building its list.
 
 312 offline tests green.
 
